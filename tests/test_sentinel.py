@@ -154,6 +154,42 @@ class ThreadGroupTest(unittest.TestCase):
 
 
 class FormatTest(unittest.TestCase):
+    def test_messages_have_balanced_html(self):
+        """Telegram HTML modu dengesiz etikette mesaji reddeder."""
+        from html.parser import HTMLParser
+
+        class Balance(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.stack = []
+                self.errors = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag in ("b", "i", "code", "a"):
+                    self.stack.append(tag)
+
+            def handle_endtag(self, tag):
+                if tag in ("b", "i", "code", "a"):
+                    if not self.stack or self.stack.pop() != tag:
+                        self.errors.append(tag)
+
+        titles = [
+            "[PATCH] hwmon: (coretemp) Add <docs> & \"labels\"",
+            "Re: [PATCH v2] hwmon: (coretemp) X",
+        ]
+        for title in titles:
+            items = [{
+                "id": "1", "title": title, "author": "A & B",
+                "updated": "2026-10-20T10:00:00Z",
+                "summary": "coretemp <b>wrong</b> & more " * 20,
+                "link": "https://l/x",
+            }]
+            pair = Balance()
+            pair.feed(sentinel.compose_lore_message(
+                sentinel.build_lore_groups(items)[0])["text"])
+            self.assertEqual(pair.stack, [])
+            self.assertEqual(pair.errors, [])
+
     def test_normalize_subject(self):
         self.assertEqual(
             sentinel.normalize_subject("Re: [PATCH v3 2/4] hwmon: (coretemp) Fix X"),
