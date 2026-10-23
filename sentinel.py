@@ -344,6 +344,52 @@ def check_patchwork(conn, config, is_baseline, messages):
     return True
 
 
+def check_lore(conn, config, is_baseline, messages):
+    """linux-hwmon lore aramasinda 'coretemp' gecen mailler.
+
+    Feed sorgusu (q=coretemp&x=A) 200 kayit ve yillara yayilan gecmis dondurur;
+    bu yuzden her zaman son lore_days gun ile sinirlanir, geriye donuk spam olmaz.
+    """
+    url = resolve_setting(config, "lore_url")
+    body = http_get(url, timeout=30)
+    if body is None:
+        return False
+    items = parse_atom(body)
+    if items is None:
+        return False
+
+    days = int(resolve_setting(config, "lore_days"))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    for item in items:
+        title_raw = item["title"]
+        summary_raw = item["summary"]
+        # Besleme sorgusu zaten daraltiyor; yine de yerelde dogrula.
+        if "coretemp" not in (title_raw + " " + summary_raw).lower():
+            continue
+
+        date = parse_iso(item["updated"])
+        if date is None or date < cutoff:
+            continue
+
+        m_id = item["id"] or item["link"]
+        if is_seen(conn, m_id, "lore"):
+            continue
+        mark_seen(conn, m_id, "lore", title_raw, None)
+
+        summary_line = short(summary_raw, 160)
+        messages.append({
+            "source": "lore",
+            "id": m_id,
+            "date": item["updated"],
+            "text": (f"📧 <b>[lore]</b> {html.escape(title_raw)}\n"
+                     f"{item['link']}\n"
+                     f"{html.escape(item['author'] or '?')} · {item['updated'][:10]}\n"
+                     + (f"<i>{html.escape(summary_line)}</i>" if summary_line else "")),
+        })
+    return True
+
+
 def main():
     config = apply_env_overrides(load_config())
     dry_run = config.get("dry_run", False)
@@ -366,6 +412,7 @@ def main():
     messages = []
     results = [
         check_patchwork(conn, config, is_baseline, messages),
+        check_lore(conn, config, is_baseline, messages),
     ]
 
     sent = dispatch(conn, config, messages, is_baseline)
@@ -379,6 +426,7 @@ def main():
         baseline_msg = (
             f"🎯 <b>Coretemp Sentinel Radar Sistemi Aktif!</b>\n\n"
             f"✅ <b>Patchwork (linux-hwmon):</b> Bağlandı.\n"
+            f"✅ <b>lore.kernel.org (linux-hwmon, son 30 gün):</b> Bağlandı.\n"
             f"📊 <b>Başlangıç Kaydı:</b> {total_now} geçmiş kayıt hafızaya alındı.\n\n"
             f"🛡️ <i>Şu andan itibaren coretemp ile ilgili yama, mail, hata ve commit "
             f"düştüğünde buraya bildirim alacaksınız.</i>"
