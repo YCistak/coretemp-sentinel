@@ -32,6 +32,9 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           SENTINEL_DB: sentinel.db
+          # git.kernel.org Atom beslemesi cokerse GitHub API'ye dusulur;
+          # token yalnizca istek basliginda kullanilir, hicbir dosyaya yazilmaz.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 sentinel.py
 
       - name: Gorulen kayit state'ini commit et

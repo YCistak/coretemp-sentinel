@@ -390,6 +390,100 @@ def check_lore(conn, config, is_baseline, messages):
     return True
 
 
+def check_bugzilla(conn, config, is_baseline, messages):
+    """Kernel Bugzilla: yalnizca ozetinde 'coretemp' gecen kayitlar.
+
+    Eski surumdeki component=Hardware Monitoring + anahtar kelime filtresi
+    yerine dar bir summary sorgusu kullanilir; boylece ilgisiz hwmon
+    gurultusu gelmez. Eski generic kayitlar DB'de kalir, temizlenmez.
+    """
+    url = resolve_setting(config, "bugzilla_url")
+    data = fetch_json(url)
+    if data is None or "bugs" not in data:
+        return False
+
+    for bug in data.get("bugs", []):
+        b_id = str(bug.get("id"))
+        summary_raw = bug.get("summary") or ""
+        if "coretemp" not in summary_raw.lower():
+            continue
+        status = bug.get("status") or ""
+        creator = bug.get("creator") or "Bilinmiyor"
+        web_url = f"https://bugzilla.kernel.org/show_bug.cgi?id={b_id}"
+
+        if is_seen(conn, b_id, "bugzilla"):
+            continue
+        mark_seen(conn, b_id, "bugzilla", summary_raw, status)
+
+        messages.append({
+            "source": "bugzilla",
+            "id": b_id,
+            "date": bug.get("last_change_time") or "",
+            "text": (f"🐛 <b>[bugzilla]</b> #{b_id} {html.escape(short(summary_raw, 140))}\n"
+                     f"{web_url}\n"
+                     f"{html.escape(status)} · {html.escape(creator)}"),
+        })
+    return True
+
+
+def check_git_commits(conn, config, is_baseline, messages):
+    """drivers/hwmon/coretemp.c commit'leri.
+
+    Tercih: git.kernel.org Atom (kimlik dogrulama/rate limit yok).
+    Basarisizsa GitHub API'ye duser; token SADECE istek basliginda kullanilir,
+    hicbir yere yazilmaz.
+    """
+    atom_url = resolve_setting(config, "git_atom_url")
+    items = None
+    body = http_get(atom_url, timeout=30)
+    if body is not None:
+        items = parse_atom(body)
+
+    if not items:
+        api_url = resolve_setting(config, "git_api_url")
+        token = os.environ.get("GITHUB_TOKEN") or None
+        data = fetch_json(api_url, auth_token=token)
+        if not data:
+            return False
+        items = []
+        for c in data:
+            commit = c.get("commit") or {}
+            items.append({
+                "id": c.get("sha") or "",
+                "title": " ".join((commit.get("message") or "").splitlines()[:1]),
+                "link": c.get("html_url") or "",
+                "updated": ((commit.get("committer") or {}).get("date") or ""),
+                "author": ((commit.get("author") or {}).get("name") or ""),
+                "summary": " ".join((commit.get("message") or "").splitlines()[1:]).strip(),
+            })
+
+    for item in items:
+        # Atom id'si "urn:sha1:<sha>", link ise ".../commit/?id=<sha>" biciminde;
+        # DB'de kisa ve kararli kimlik olarak duz sha tutulur.
+        sha = item["id"]
+        if sha.startswith("urn:sha1:"):
+            sha = sha[len("urn:sha1:"):]
+        if "id=" in item["link"]:
+            sha = item["link"].split("id=")[-1] or sha
+        if not sha or is_seen(conn, sha, "git"):
+            continue
+        title_raw = item["title"]
+        # Yol filtresi zaten coretemp.c'ye dokunan commit'leri getirir; baslik
+        # coretemp gecmese de (x86/msr, merge tag) dosyaya dokundugu icin tutulur.
+        mark_seen(conn, sha, "git", title_raw, None)
+
+        messages.append({
+            "source": "git",
+            "id": sha,
+            "date": item["updated"],
+            "text": (f"💾 <b>[git]</b> {html.escape(title_raw)}\n"
+                     f"{item['link']}\n"
+                     f"{item['updated'][:10]} · {html.escape(item['author'] or '?')}\n"
+                     f"<code>{sha[:12]}</code>"),
+        })
+    return True
+
+
 def main():
     config = apply_env_overrides(load_config())
     dry_run = config.get("dry_run", False)
@@ -409,24 +503,39 @@ def main():
     if is_baseline:
         print("[*] Ilk calistirma: Mevcut kayitlar taban cizgisi (baseline) olarak kaydediliyor...")
 
-    messages = []
-    results = [
-        check_patchwork(conn, config, is_baseline, messages),
-        check_lore(conn, config, is_baseline, messages),
+    sources = [
+        ("Patchwork (linux-hwmon)", check_patchwork),
+        ("lore.kernel.org (linux-hwmon, son 30 gün)", check_lore),
+        ("Kernel Bugzilla (summary=coretemp)", check_bugzilla),
+        ("git.kernel.org (drivers/hwmon/coretemp.c)", check_git_commits),
     ]
+
+    messages = []
+    status = {}
+    for label, func in sources:
+        # Tek kaynak cokse bile digerleri devam eder; hata ilgili fonksiyonda
+        # stderr'e yazilir, workflow'u dusurmez.
+        try:
+            status[label] = bool(func(conn, config, is_baseline, messages))
+        except Exception as e:
+            print(f"[hata] {label}: {e}", file=sys.stderr)
+            status[label] = False
 
     sent = dispatch(conn, config, messages, is_baseline)
 
-    if all(not r for r in results):
+    if not any(status.values()):
         print("[!] Tum kaynaklar basarisiz oldu.", file=sys.stderr)
         sys.exit(1)
 
     if is_baseline:
         total_now = count_seen(conn)
+        lines = "\n".join(
+            f"{'✅' if ok else '⚠️'} <b>{label}:</b> {'Bağlandı' if ok else 'Ulaşılamadı'}"
+            for label, ok in status.items()
+        )
         baseline_msg = (
             f"🎯 <b>Coretemp Sentinel Radar Sistemi Aktif!</b>\n\n"
-            f"✅ <b>Patchwork (linux-hwmon):</b> Bağlandı.\n"
-            f"✅ <b>lore.kernel.org (linux-hwmon, son 30 gün):</b> Bağlandı.\n"
+            f"{lines}\n"
             f"📊 <b>Başlangıç Kaydı:</b> {total_now} geçmiş kayıt hafızaya alındı.\n\n"
             f"🛡️ <i>Şu andan itibaren coretemp ile ilgili yama, mail, hata ve commit "
             f"düştüğünde buraya bildirim alacaksınız.</i>"

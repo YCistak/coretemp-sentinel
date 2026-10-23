@@ -6,12 +6,23 @@ bildirim atan küçük bir bot. Tek bağımlılık Python 3 standart kütüphane
 
 ## Ne yapıyor?
 
-Her koşuda iki kaynağı tarar:
+Her koşuda dört kaynağı tarar (hepsi **sadece coretemp** odaklı, genel hwmon gürültüsü yok):
 
-| Kaynak | Sorgu |
-|---|---|
-| Patchwork (linux-hwmon) | `project=linux-hwmon&q=coretemp` — yeni yamalar |
-| Kernel Bugzilla | `component=Hardware Monitoring`, son 15 kayıt, anahtar kelime filtresi (`coretemp`, `intel`, `temperature`, `thermal`, `tjmax` …) |
+| Kaynak | Sorgu | Ne bildirir |
+|---|---|---|
+| Patchwork (linux-hwmon) | `project=linux-hwmon&q=coretemp` | yeni yama **ve** aynı yamanın `state` değişimi (`accepted`/`rejected`/`superseded`/`changes-requested`/`under-review`) |
+| lore.kernel.org | `linux-hwmon/?q=coretemp&x=A` (Atom) | son 30 gündeki coretemp mail'leri (başlık/gövdede coretemp geçen) |
+| Kernel Bugzilla | `rest/bug?summary=coretemp` | özetinde coretemp geçen hatalar |
+| git.kernel.org | `.../linux.git/atom/drivers/hwmon/coretemp.c` | coretemp.c'ye dokunan commit'ler (Atom çökerse GitHub API + `GITHUB_TOKEN`) |
+
+Mesaj formatı kısa: `[kaynak] başlık — link` + tek satır özet. Bir koşuda en fazla
+**10 mesaj** gider; fazlası en yeniden geriye doğru kesilir ve tek satır
+"N kayıt daha var" notu düşülür. Bir kaynak 4xx/5xx dönerse diğerleri çalışmaya devam eder
+(hata stderr'e yazılır, workflow fail olmaz); yalnız **tümü** birden çökerse çıkış kodu 1 olur.
+
+**Durum takibi:** `seen` tablosunda `state` kolonu vardır (eski DB'ler `ALTER TABLE` ile
+kendiliğinden güncellenir). Migration sonrası `state` değeri boş olan eski kayıtlar sessizce
+doldurulur; böylece ilk koşuda sahte "durum değişti" bildirimi gitmez.
 
 Görülen kayıtlar `seen` tablosunda (`sentinel.db`) tutulur; daha önce bildirilmiş bir kayıt
 için **ikinci kez mesaj atılmaz**. DB boşsa ilk koşu "baseline" sayılır: mevcut kayıtlar
@@ -32,6 +43,20 @@ sessizce hafızaya alınır ve tek bir "sistem aktif" mesajı gönderilir.
 Betik token/chat_id'yi önce ortam değişkeninden (`TELEGRAM_TOKEN`, `CHAT_ID`) okur;
 bulamazsa `~/.config/coretemp-sentinel/config.json` dosyasına düşer. DB yolu
 `SENTINEL_DB` ile değiştirilebilir, varsayılan `./sentinel.db`.
+
+Kaynak adresleri koda gömülü varsayılanlarla gelir, istenirse ortam değişkeni veya
+`config.json` ile ezilir:
+
+| Ayar | Ortam değişkeni | Varsayılan |
+|---|---|---|
+| Patchwork | `SENTINEL_PATCHWORK_URL` | `patchwork.kernel.org/api/1.2/patches/?project=linux-hwmon&q=coretemp` |
+| lore | `SENTINEL_LORE_URL` | `lore.kernel.org/linux-hwmon/?q=coretemp&x=A` |
+| Bugzilla | `SENTINEL_BUGZILLA_URL` | `bugzilla.kernel.org/rest/bug?summary=coretemp…` |
+| git Atom | `SENTINEL_GIT_ATOM_URL` | `git.kernel.org/…/atom/drivers/hwmon/coretemp.c` |
+| git API (yedek) | `SENTINEL_GIT_API_URL` | `api.github.com/repos/torvalds/linux/commits?path=…` |
+
+> lore.kernel.org özel `User-Agent` istiyor: varsayılan curl/urllib UA'sı **403** alır,
+> `CoretempSentinel/1.0` ile 200 döner.
 
 Her koşudan sonra `sentinel.db` değiştiyse workflow dosyayı
 `chore: update seen state [skip ci]` mesajıyla repoya geri commit'ler. **Bu commit kritiktir:**
@@ -65,6 +90,15 @@ export TELEGRAM_TOKEN=...   # veya config.json kullan
 export CHAT_ID=...
 SENTINEL_DB=./sentinel.db python3 sentinel.py
 ```
+
+**Kuru çalıştırma (Telegram atmaz, gerçek DB'ye dokunmaz):**
+
+```bash
+DRY_RUN=1 python3 sentinel.py          # belleğe yazar, sadece mesajları basar
+```
+
+Tek bir kaynağı denemek için: `python3 -c "import sentinel; ..."` ile ilgili
+`check_*` fonksiyonunu çağırın (aşağıdaki test bölümüne bakın).
 
 ## Notlar
 
