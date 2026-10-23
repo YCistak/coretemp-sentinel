@@ -70,3 +70,5 @@ SENTINEL_DB=./sentinel.db python3 sentinel.py
 
 - Token hiçbir zaman repoya yazılmaz; yalnızca GitHub secret olarak durur.
 - `sentinel.db` bilinçli olarak commit edilir (state), `.gitignore`'a eklenmez.
+
+**Keepalive:** `.github/workflows/keepalive.yml` her ayın 1'inde `.keepalive` dosyasına tarih yazıp commit atar; amaç, 60 gün hareketsizlik yüzünden GitHub'ın `sentinel.yml` schedule'ını kendiliğinden kapatmasını önlemektir.

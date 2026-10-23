@@ -1,0 +1,31 @@
+name: keepalive
+
+on:
+  schedule:
+    # Her ayın 1'i 03:00 UTC — 60 gün hareketsizlik nedeniyle schedule'ların
+    # GitHub tarafından devre dışı bırakılmasını engeller.
+    - cron: '0 3 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Touch .keepalive
+        run: |
+          date -u +%Y-%m-%dT%H:%M:%SZ > .keepalive
+          if git diff --quiet -- .keepalive; then
+            echo "Değişiklik yok, commit atlanıyor."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .keepalive
+          git commit -m "chore: keepalive [skip ci]"
+          git push
