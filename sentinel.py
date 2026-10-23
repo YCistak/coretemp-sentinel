@@ -12,11 +12,15 @@ Tek bagimlilik Python 3 standart kutuphanesidir.
 DRY_RUN=1 ile telegram atmadan, gecici (bellek ici) DB ile sadece parse eder.
 """
 
+import atexit
 import html
 import json
 import os
+import re
+import shutil
 import sqlite3
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -101,10 +105,29 @@ def resolve_db_path(config):
 # Veritabani
 # --------------------------------------------------------------------------
 
+_DRY_TMP_DB = None
+
+
 def init_db(db_path, dry_run=False):
+    """DB'yi acar. dry_run'da gercek DB'nin kopyasi kullanilir.
+
+    Kopya sayesinde kuru kosu gercek state'i bozmaz ama gercek kayitlarla
+    karsilastirma yapar (bellek ici bos DB her kosuyu 'baseline' yapardi).
+    """
+    global _DRY_TMP_DB
     if dry_run:
-        # Deneme kosusu gercek state'i kirletmesin.
-        conn = sqlite3.connect(":memory:")
+        source = os.environ.get("SENTINEL_DRY_DB") or db_path
+        if source and os.path.exists(source) and os.path.getsize(source) > 0:
+            handle = tempfile.NamedTemporaryFile(
+                prefix="coretemp-sentinel-dry-", suffix=".db", delete=False)
+            handle.close()
+            shutil.copy2(source, handle.name)
+            _DRY_TMP_DB = handle.name
+            atexit.register(_cleanup_dry_db, handle.name)
+            print(f"[i] DRY_RUN: gercek DB kopyasi kullaniliyor ({handle.name})")
+            conn = sqlite3.connect(handle.name)
+        else:
+            conn = sqlite3.connect(":memory:")
     else:
         parent = os.path.dirname(db_path)
         if parent:
@@ -126,6 +149,13 @@ def init_db(db_path, dry_run=False):
         cur.execute("ALTER TABLE seen ADD COLUMN state TEXT")
     conn.commit()
     return conn
+
+
+def _cleanup_dry_db(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def is_seen(conn, item_id, source):
@@ -248,6 +278,175 @@ def short(text, limit=160):
 
 
 # --------------------------------------------------------------------------
+# Turkce aciklama (her bildirimin sonunda, tipine gore degisen 2 cumle)
+# --------------------------------------------------------------------------
+
+SUMMARY_LIMIT = 300      # uzun mail ozeti bu karakterde kesilir
+MAX_MESSAGE_LEN = 4096   # Telegram tek mesaj siniri
+
+EXPLANATIONS = {
+    # lore
+    "lore_patch_new": (
+        "Bu, listeye yeni gelen bir yama önerisi. Kabul edilmesi için önce "
+        "incelenip test edilmesi gerekiyor; diff'i okuyup kendi makinende deneyebilirsin."
+    ),
+    "lore_patch_thread": (
+        "Yeni bir yama önerisi geldi ve altına cevaplar yazıldı. Yamanın kabul "
+        "durumunu anlamak için thread'in son mesajlarını ve maintainer yorumlarını oku."
+    ),
+    "lore_applied": (
+        "Yama kabul edildi ve hwmon-next kuyruğuna alındı. Bir sonraki merge "
+        "window'unda mainline çekirdeğe girer, acil bir şey yapman gerekmiyor."
+    ),
+    "lore_review_tag": (
+        "Yamaya başka bir geliştirici destek veya test onayı verdi. Onay sayısı "
+        "arttıkça maintainer'ın yamayı alma olasılığı yükselir."
+    ),
+    "lore_changes": (
+        "Yama bu haliyle kabul edilmedi, düzeltme istendi. Yeni bir sürüm (v2) "
+        "gönderilmesi gerekiyor; yorumları okuyup yamayı güncelle."
+    ),
+    "lore_reply": (
+        "Bu, mevcut bir yama tartışmasına gelen cevap. Argümanı takip etmek için "
+        "thread'i bütün olarak okumak gerekiyor."
+    ),
+    # patchwork
+    "patchwork_new": (
+        "Patchwork'e yeni bir yama düştü, henüz incelenmemiş durumda. İlgini "
+        "çekiyorsa yorum yazabilir veya test edip Tested-by verebilirsin."
+    ),
+    "patchwork_accepted": (
+        "Yama kabul edildi, hwmon-next'e girecek. Senin yaman ise artık mainline "
+        "yolunda demektir."
+    ),
+    "patchwork_rejected": (
+        "Yama reddedildi, bu haliyle çekirdeğe girmeyecek. Sebebini yorumlardan "
+        "öğrenip yeni sürüm hazırlayabilirsin."
+    ),
+    "patchwork_changes": (
+        "Maintainer yamada değişiklik istedi. Belirtilen noktaları düzeltip v2 "
+        "göndermen gerekiyor."
+    ),
+    "patchwork_superseded": (
+        "Bu yama daha yeni bir sürüm tarafından geçersiz kılındı. Son sürümü "
+        "takip et, eski olanla uğraşma."
+    ),
+    "patchwork_other": (
+        "Yamanın Patchwork durumu \"{detail}\" olarak değişti; bu kabul ya da ret "
+        "anlamına gelmiyor. Yama sayfasındaki yorumlara bakıp sürecin nereye "
+        "gittiğini takip et."
+    ),
+    # git
+    "git_commit": (
+        "coretemp sürücüsüne bir değişiklik merge edildi, yani artık mainline "
+        "çekirdekte. Değişikliği okuyup senin yamanla çakışıp çakışmadığını kontrol et."
+    ),
+    # bugzilla
+    "bugzilla_open": (
+        "coretemp ile ilgili bir hata kaydı açıldı ya da güncellendi. Kullanıcı "
+        "şikayeti sürücü hatasına işaret ediyorsa aynı durumu kendi makinende "
+        "yeniden üretmeyi denemek işe yarar."
+    ),
+    "bugzilla_resolved": (
+        "Hata kaydı kapatıldı, sorun çözülmüş sayılıyor. Çözümün doğru olup "
+        "olmadığını yamaya bakarak teyit edebilirsin."
+    ),
+    # bilinmeyen tip
+    "default": (
+        "Bu, coretemp ile ilgili bir gelişme. Ayrıntıyı görmek için bağlantıyı "
+        "açıp değişikliğin senin yamanı etkileyip etkilemediğine bak."
+    ),
+}
+
+# lore govdesinde gecen karar ifadeleri. Sirasi onemli: once "kabul edildi",
+# sonra review etiketi, sonra degisiklik talebi, en son yeni yama.
+_RE_APPLIED = re.compile(r"\bapplied\.", re.I)
+_RE_REVIEW = re.compile(r"(?mi)^\s*(reviewed-by|acked-by|tested-by)\s*:")
+_RE_CHANGES = re.compile(
+    r"\b(?:nack|nak)\b|please fix|changes requested|v2 requested|"
+    r"please (?:re)?(?:send|submit|post) (?:a )?v2",
+    re.I,
+)
+_RE_PATCH_SUBJECT = re.compile(r"^\[\s*(?:RFC\s*)?PATCH", re.I)
+_RE_REPLY_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd)\s*:\s*)+", re.I)
+_RE_BRACKET_TAG = re.compile(r"\[[^\]]*\]")
+_RE_SENTENCE = re.compile(r"[^.!?]+[.!?]")
+
+
+def classify_lore(title, body):
+    """lore mailini deterministik olarak siniflandirir (LLM yok)."""
+    title = title or ""
+    body = body or ""
+    if _RE_APPLIED.search(body):
+        return "lore_applied"
+    if _RE_REVIEW.search(body):
+        return "lore_review_tag"
+    if _RE_CHANGES.search(body):
+        return "lore_changes"
+    if _RE_PATCH_SUBJECT.match(title.strip()):
+        return "lore_patch_new"
+    return "lore_reply"
+
+
+def classify_patchwork(state, is_new):
+    """Patchwork state -> aciklama tipi."""
+    if is_new:
+        return "patchwork_new"
+    state = (state or "").lower()
+    mapping = {
+        "accepted": "patchwork_accepted",
+        "rejected": "patchwork_rejected",
+        "changes-requested": "patchwork_changes",
+        "superseded": "patchwork_superseded",
+    }
+    return mapping.get(state, "patchwork_other")
+
+
+def classify_bugzilla(status):
+    """RESOLVED/CLOSED/VERIFIED -> kapanmis, digerleri -> acik."""
+    return ("bugzilla_resolved"
+            if (status or "").upper() in ("RESOLVED", "CLOSED", "VERIFIED")
+            else "bugzilla_open")
+
+
+def explain(kind, detail=""):
+    """Tipin 2 cumlelik Turkce aciklamasini doner."""
+    text = EXPLANATIONS.get(kind, EXPLANATIONS["default"])
+    if "{detail}" in text:
+        text = text.replace("{detail}", short(detail, 40) or "bilinmiyor")
+    return text
+
+
+def with_explanation(lines, kind, detail=""):
+    """Govde satirlarinin sonuna bos satir + aciklama ekler."""
+    body = "\n".join(lines).rstrip()
+    return f"{body}\n\n{explain(kind, detail)}"
+
+
+def clamp_message(text, limit=MAX_MESSAGE_LEN):
+    """Telegram'in 4096 karakter sinirini asmadan keser."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def normalize_subject(title):
+    """Thread gruplamasi icin konu basligini sadelestirir.
+
+    'Re: [PATCH v3 2/4] hwmon: ...' -> 'hwmon: ...' (kucuk harf).
+    """
+    text = _RE_REPLY_PREFIX.sub("", title or "")
+    text = _RE_BRACKET_TAG.sub(" ", text)
+    text = " ".join(text.split()).strip().lower()
+    return text or "(konusuz)"
+
+
+def display_subject(title):
+    """Gorunen baslik: yalnizca Re:/Fw: onekleri temizlenir, [PATCH v2] kalir."""
+    return _RE_REPLY_PREFIX.sub("", " ".join((title or "").split())).strip() or "(konusuz)"
+
+
+# --------------------------------------------------------------------------
 # Bildirim kuyrugu
 # --------------------------------------------------------------------------
 
@@ -283,10 +482,11 @@ def dispatch(conn, config, messages, is_baseline):
     to_send, dropped = ordered[:max_messages], ordered[max_messages:]
 
     for msg in to_send:
+        text = clamp_message(msg["text"])
         if config.get("dry_run"):
-            print(f"\n--- DRY_RUN mesaj ({msg['source']}) ---\n{msg['text']}")
+            print(f"\n--- DRY_RUN mesaj ({msg['source']}) [{len(text)} karakter] ---\n{text}")
         else:
-            send_telegram(config["telegram_token"], config["chat_id"], msg["text"])
+            send_telegram(config["telegram_token"], config["chat_id"], text)
 
     if dropped:
         note = f"ℹ️ <b>{len(dropped)} kayıt daha var</b> (bir sonraki koşuda gönderilmeyecek, filtrelendi)."
@@ -323,9 +523,11 @@ def check_patchwork(conn, config, is_baseline, messages):
                 "source": "patchwork",
                 "id": p_id,
                 "date": patch.get("date") or "",
-                "text": (f"🆕 <b>[patchwork]</b> {title}\n"
-                         f"{web_url}\n"
-                         f"{date_str} · {submitter} · {html.escape(p_state)}"),
+                "text": with_explanation([
+                    f"🆕 <b>[patchwork]</b> {title}",
+                    web_url,
+                    f"{date_str} · {submitter} · {html.escape(p_state)}",
+                ], classify_patchwork(p_state, is_new=True)),
             })
         elif p_state and p_state != old_state:
             mark_seen(conn, p_id, "patchwork", title, p_state)
@@ -337,18 +539,89 @@ def check_patchwork(conn, config, is_baseline, messages):
                 "source": "patchwork",
                 "id": p_id,
                 "date": patch.get("date") or "",
-                "text": (f"🔄 <b>[patchwork]</b> {title}\n"
-                         f"{web_url}\n"
-                         f"durum: {html.escape(old_state or '?')} → {html.escape(p_state)}"),
+                "text": with_explanation([
+                    f"🔄 <b>[patchwork]</b> {title}",
+                    web_url,
+                    f"durum: {html.escape(old_state or '?')} → {html.escape(p_state)}",
+                ], classify_patchwork(p_state, is_new=False), detail=p_state),
             })
     return True
 
 
+def build_lore_groups(items):
+    """Yeni lore maillerini thread'e gore gruplar, en yeni once siralar.
+
+    Her grup: key, title, link, authors, count, date, summary, kinds,
+    newest_kind alanlarini tasir. Thread kimligi Atom beslemesinde olmadigi
+    icin normalize edilmis konu basligi kullanilir.
+    """
+    groups = {}
+    for item in items:
+        key = normalize_subject(item["title"])
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {"authors": [], "count": 0, "kinds": set(), "items": []}
+        group["count"] += 1
+        if item["author"] and item["author"] not in group["authors"]:
+            group["authors"].append(item["author"])
+        group["kinds"].add(classify_lore(item["title"], item["summary"]))
+        group["items"].append(item)
+
+    result = []
+    for group in groups.values():
+        # Grubun temsilcisi en yeni maildir.
+        newest = max(group["items"], key=lambda i: i["updated"] or "")
+        result.append({
+            "key": normalize_subject(newest["title"]),
+            "title": display_subject(newest["title"]),
+            "link": newest["link"],
+            "authors": group["authors"],
+            "count": group["count"],
+            "date": newest["updated"],
+            "summary": newest["summary"],
+            "kinds": group["kinds"],
+            "newest_kind": classify_lore(newest["title"], newest["summary"]),
+        })
+    result.sort(key=lambda g: g["date"] or "", reverse=True)
+    return result
+
+
+def lore_group_kind(group):
+    """Grup icin aciklama tipini sec: en yeni mailin karari onceliklidir."""
+    newest = group["newest_kind"]
+    if newest in ("lore_applied", "lore_review_tag", "lore_changes"):
+        return newest
+    if "lore_patch_new" in group["kinds"]:
+        return "lore_patch_new" if group["count"] == 1 else "lore_patch_thread"
+    return newest
+
+
+def compose_lore_message(group):
+    """Bir thread'in tum yeni maillerini tek bildirim metnine cevirir."""
+    authors = ", ".join(group["authors"][:3])
+    if len(group["authors"]) > 3:
+        authors += f" +{len(group['authors']) - 3}"
+    meta = f"{authors or '?'} · {group['date'][:10]}"
+    if group["count"] > 1:
+        meta += f" · {group['count']} yeni mail"
+    summary_line = short(group["summary"], SUMMARY_LIMIT)
+    lines = [f"📧 <b>[lore]</b> {html.escape(group['title'])}", group["link"], meta]
+    if summary_line:
+        lines.append(f"<i>{html.escape(summary_line)}</i>")
+    return {
+        "source": "lore",
+        "id": group["key"],
+        "date": group["date"],
+        "text": clamp_message(with_explanation(lines, lore_group_kind(group))),
+    }
+
+
 def check_lore(conn, config, is_baseline, messages):
-    """linux-hwmon lore aramasinda 'coretemp' gecen mailler.
+    """linux-hwmon lore aramasinda 'coretemp' gecen mailler (thread bazli).
 
     Feed sorgusu (q=coretemp&x=A) 200 kayit ve yillara yayilan gecmis dondurur;
     bu yuzden her zaman son lore_days gun ile sinirlanir, geriye donuk spam olmaz.
+    Ayni thread'e ait yeni mailler tek bildirimde toplanir.
     """
     url = resolve_setting(config, "lore_url")
     body = http_get(url, timeout=30)
@@ -361,6 +634,7 @@ def check_lore(conn, config, is_baseline, messages):
     days = int(resolve_setting(config, "lore_days"))
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
+    new_items = []
     for item in items:
         title_raw = item["title"]
         summary_raw = item["summary"]
@@ -376,17 +650,17 @@ def check_lore(conn, config, is_baseline, messages):
         if is_seen(conn, m_id, "lore"):
             continue
         mark_seen(conn, m_id, "lore", title_raw, None)
-
-        summary_line = short(summary_raw, 160)
-        messages.append({
-            "source": "lore",
+        new_items.append({
             "id": m_id,
-            "date": item["updated"],
-            "text": (f"📧 <b>[lore]</b> {html.escape(title_raw)}\n"
-                     f"{item['link']}\n"
-                     f"{html.escape(item['author'] or '?')} · {item['updated'][:10]}\n"
-                     + (f"<i>{html.escape(summary_line)}</i>" if summary_line else "")),
+            "title": title_raw,
+            "link": item["link"],
+            "updated": item["updated"],
+            "author": item["author"],
+            "summary": summary_raw,
         })
+
+    for group in build_lore_groups(new_items):
+        messages.append(compose_lore_message(group))
     return True
 
 
@@ -419,9 +693,11 @@ def check_bugzilla(conn, config, is_baseline, messages):
             "source": "bugzilla",
             "id": b_id,
             "date": bug.get("last_change_time") or "",
-            "text": (f"🐛 <b>[bugzilla]</b> #{b_id} {html.escape(short(summary_raw, 140))}\n"
-                     f"{web_url}\n"
-                     f"{html.escape(status)} · {html.escape(creator)}"),
+            "text": clamp_message(with_explanation([
+                f"🐛 <b>[bugzilla]</b> #{b_id} {html.escape(short(summary_raw, 140))}",
+                web_url,
+                f"{html.escape(status)} · {html.escape(creator)}",
+            ], classify_bugzilla(status))),
         })
     return True
 
@@ -476,10 +752,12 @@ def check_git_commits(conn, config, is_baseline, messages):
             "source": "git",
             "id": sha,
             "date": item["updated"],
-            "text": (f"💾 <b>[git]</b> {html.escape(title_raw)}\n"
-                     f"{item['link']}\n"
-                     f"{item['updated'][:10]} · {html.escape(item['author'] or '?')}\n"
-                     f"<code>{sha[:12]}</code>"),
+            "text": clamp_message(with_explanation([
+                f"💾 <b>[git]</b> {html.escape(title_raw)}",
+                item["link"],
+                f"{item['updated'][:10]} · {html.escape(item['author'] or '?')}",
+                f"<code>{sha[:12]}</code>",
+            ], "git_commit")),
         })
     return True
 
