@@ -278,14 +278,18 @@ def short(text, limit=160):
 
 
 # --------------------------------------------------------------------------
-# Turkce aciklama (her bildirimin sonunda, tipine gore degisen 2 cumle)
+# Turkce derinlemesine aciklama ve analiz motoru
 # --------------------------------------------------------------------------
 
-SUMMARY_LIMIT = 300      # uzun mail ozeti bu karakterde kesilir
 MAX_MESSAGE_LEN = 4096   # Telegram tek mesaj siniri
 
+
+
+# --------------------------------------------------------------------------
+# Geriye dönük uyumluluk ve sınıflandırma yardımcıları
+# --------------------------------------------------------------------------
+
 EXPLANATIONS = {
-    # lore
     "lore_patch_new": (
         "Bu, listeye yeni gelen bir yama önerisi. Kabul edilmesi için önce "
         "incelenip test edilmesi gerekiyor; diff'i okuyup kendi makinende deneyebilirsin."
@@ -310,7 +314,6 @@ EXPLANATIONS = {
         "Bu, mevcut bir yama tartışmasına gelen cevap. Argümanı takip etmek için "
         "thread'i bütün olarak okumak gerekiyor."
     ),
-    # patchwork
     "patchwork_new": (
         "Patchwork'e yeni bir yama düştü, henüz incelenmemiş durumda. İlgini "
         "çekiyorsa yorum yazabilir veya test edip Tested-by verebilirsin."
@@ -336,12 +339,10 @@ EXPLANATIONS = {
         "anlamına gelmiyor. Yama sayfasındaki yorumlara bakıp sürecin nereye "
         "gittiğini takip et."
     ),
-    # git
     "git_commit": (
         "coretemp sürücüsüne bir değişiklik merge edildi, yani artık mainline "
         "çekirdekte. Değişikliği okuyup senin yamanla çakışıp çakışmadığını kontrol et."
     ),
-    # bugzilla
     "bugzilla_open": (
         "coretemp ile ilgili bir hata kaydı açıldı ya da güncellendi. Kullanıcı "
         "şikayeti sürücü hatasına işaret ediyorsa aynı durumu kendi makinende "
@@ -351,15 +352,12 @@ EXPLANATIONS = {
         "Hata kaydı kapatıldı, sorun çözülmüş sayılıyor. Çözümün doğru olup "
         "olmadığını yamaya bakarak teyit edebilirsin."
     ),
-    # bilinmeyen tip
     "default": (
         "Bu, coretemp ile ilgili bir gelişme. Ayrıntıyı görmek için bağlantıyı "
         "açıp değişikliğin senin yamanı etkileyip etkilemediğine bak."
     ),
 }
 
-# lore govdesinde gecen karar ifadeleri. Sirasi onemli: once "kabul edildi",
-# sonra review etiketi, sonra degisiklik talebi, en son yeni yama.
 _RE_APPLIED = re.compile(r"\bapplied\.", re.I)
 _RE_REVIEW = re.compile(r"(?mi)^\s*(reviewed-by|acked-by|tested-by)\s*:")
 _RE_CHANGES = re.compile(
@@ -372,9 +370,7 @@ _RE_REPLY_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd)\s*:\s*)+", re.I)
 _RE_BRACKET_TAG = re.compile(r"\[[^\]]*\]")
 _RE_SENTENCE = re.compile(r"[^.!?]+[.!?]")
 
-
 def classify_lore(title, body):
-    """lore mailini deterministik olarak siniflandirir (LLM yok)."""
     title = title or ""
     body = body or ""
     if _RE_APPLIED.search(body):
@@ -387,9 +383,7 @@ def classify_lore(title, body):
         return "lore_patch_new"
     return "lore_reply"
 
-
 def classify_patchwork(state, is_new):
-    """Patchwork state -> aciklama tipi."""
     if is_new:
         return "patchwork_new"
     state = (state or "").lower()
@@ -401,26 +395,172 @@ def classify_patchwork(state, is_new):
     }
     return mapping.get(state, "patchwork_other")
 
-
 def classify_bugzilla(status):
-    """RESOLVED/CLOSED/VERIFIED -> kapanmis, digerleri -> acik."""
     return ("bugzilla_resolved"
             if (status or "").upper() in ("RESOLVED", "CLOSED", "VERIFIED")
             else "bugzilla_open")
 
-
 def explain(kind, detail=""):
-    """Tipin 2 cumlelik Turkce aciklamasini doner."""
-    text = EXPLANATIONS.get(kind, EXPLANATIONS["default"])
-    if "{detail}" in text:
-        text = text.replace("{detail}", short(detail, 40) or "bilinmiyor")
-    return text
+    template = EXPLANATIONS.get(kind, EXPLANATIONS["default"])
+    return template.format(detail=detail)
 
+_RE_REPLY_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd)\s*:\s*)+", re.I)
 
 def with_explanation(lines, kind, detail=""):
     """Govde satirlarinin sonuna bos satir + aciklama ekler."""
     body = "\n".join(lines).rstrip()
-    return f"{body}\n\n{explain(kind, detail)}"
+    if kind == "git_commit":
+        aciklama = "💾 <b>GIT COMMIT:</b> coretemp sürücüsüne mainline çekirdekte yeni bir commit merge edildi. Değişikliğin senin yamanla veya sürücü mantığıyla ilişkisini inceleyebilirsin."
+    else:
+        aciklama = f"ℹ️ <b>DURUM:</b> {kind}"
+    return f"{body}\n\n{aciklama}"
+
+def analyze_lore_group(group):
+    """
+    Kuru 2 cumlelik sablonlar yerine; kimin ne dedigini, Guenter'in fircasini,
+    kabulleri ve Asaf'in maintainerlik hedefine etkisini ayrintili aciklar.
+    """
+    title = group.get("title", "")
+    authors = group.get("authors", [])
+    items = group.get("items", [])
+    
+    # Tum gruptaki metinleri birlestir ve en yeni mesaji bul
+    full_text = " ".join(item.get("summary", "") for item in items)
+    newest = items[-1] if items else {}
+    newest_author = newest.get("author", "")
+    newest_summary = newest.get("summary", "")
+    
+    # Alinti olmayan satirlari ayikla
+    reply_lines = []
+    for line in newest_summary.splitlines():
+        line_s = line.strip()
+        if not line_s.startswith(">") and line_s:
+            if line_s in ("--", "---", "-- "):
+                break
+            reply_lines.append(line_s)
+    clean_reply = " ".join(reply_lines)
+    
+    # Onemli kisiler
+    has_guenter = any("guenter" in a.lower() or "roeck" in a.lower() for a in authors)
+    has_ximing = any("ximing" in a.lower() or "zhang" in a.lower() for a in authors)
+    has_asaf = any("asaf" in a.lower() or "ycistak" in a.lower() for a in authors)
+    
+    parts = []
+    
+    # 1. FIRCA / SERT RET / AZAR DURUMU
+    if re.search(r"please refrain|overloaded with patches|result in me getting even further behind|not getting fixed", full_text, re.I):
+        parts.append(
+            "⚠️ <b>MAINTAINER FIRÇASI / SERT RET!</b>\n"
+            "Linux hwmon lideri <b>Guenter Roeck</b> bu yamayı kesin bir dille reddetti ve Ximing Zhang'ı çok sert azarladı:\n"
+            "<i>'Zaten gerçek dünyadaki gerçek sorunları çözen yamalarla boğulmuş durumdayım. "
+            "Lütfen bir daha masa başında uydurulmuş benzer teorik yamalar gönderip durma, vaktimi alıyorsun!'</i>\n\n"
+            "📌 <b>Maintainer'lık Hedefimiz İçin Anlamı:</b> Rakibiniz Ximing teorik kod spamlamaktan dolayı maintainer nezdinde çok ciddi eksi puan aldı. "
+            "Guenter'ın sadece 'gerçek donanımda kanıtlanmış sorunları' istediğini net olarak görmüş olduk."
+        )
+    # 2. GERI VITES / DISREGARD DURUMU
+    elif re.search(r"please disregard|it is theoretical|not observed the failure|withdrawing", full_text, re.I):
+        parts.append(
+            "🔄 <b>YAMA GERİ ÇEKİLDİ (Disregard):</b>\n"
+            "Geliştirici (Ximing Zhang), hatayı gerçek bir sistemde görmediğini, yalnızca yapay hata enjeksiyonuyla üretilmiş "
+            "teorik bir kurgu olduğunu itiraf etti ve Guenter'dan yamasının çöpe atılmasını rica etti."
+        )
+    # 3. KABUL (Applied) DURUMU
+    elif re.search(r"\bapplied\.", full_text, re.I):
+        if has_asaf and "document sysfs numbering" in title.lower():
+            parts.append(
+                "🎉 <b>MÜJDE: SENİN YAMAN RESMEN KABUL EDİLDİ (Applied)!</b>\n"
+                "Linux donanım izleme lideri <b>Guenter Roeck</b> senin yamanı tek kelime itiraz etmeden kabul etti ('Applied'). "
+                "Yaman resmi <code>hwmon-next</code> dalına alındı ve ana Linux çekirdeğine girecek! İlk çekirdek başarın resmileşti."
+            )
+        elif has_asaf and has_ximing:
+            parts.append(
+                "🎉 <b>TEST ETTİĞİN YAMA KABUL EDİLDİ:</b>\n"
+                "Ximing'in bu yaması, senin verdiğin <code>Tested-by: Asaf Nuri Bertizlioğlu</code> onayı sayesinde "
+                "Guenter Roeck tarafından kabul edildi. Adın çekirdek git geçmişinde resmi testçi olarak yer aldı!"
+            )
+        else:
+            parts.append(
+                "🎉 <b>YAMA KABUL EDİLDİ (Applied):</b>\n"
+                "Maintainer Guenter Roeck bu yamayı resmi olarak kabul etti ve çekirdek kuyruğuna (hwmon-next) ekledi."
+            )
+    # 4. SORGULAMA DURUMU (Teorik mi gercek mi?)
+    elif re.search(r"is that a theoretic or a real problem|have you observed it on a real system", full_text, re.I):
+        parts.append(
+            "❓ <b>MAINTAINER SORGULAMASI:</b>\n"
+            "Guenter Roeck bu yamanın gerçek bir donanımda test edilip edilmediğini sordu. "
+            "Geliştiricinin yapay hata enjeksiyonu yaptığından şüphelenerek hesap sordu."
+        )
+    # 5. TEST / ONAY DURUMU
+    elif re.search(r"\b(reviewed-by|tested-by):", full_text, re.I):
+        parts.append(
+            "✅ <b>İNCELEME VE TEST ONAYI:</b>\n"
+            "Geliştiriciler yamayı test edip onay etiketlerini (Tested-by / Reviewed-by) ekledi. "
+            "Bu durum yamanın güvenilirliğini artırır."
+        )
+    # 6. YENI YAMA
+    elif re.match(r"^\[\s*(?:RFC\s*)?PATCH", title.strip(), re.I):
+        if has_ximing:
+            parts.append(
+                "📝 <b>RAKİP GELİŞTİRİCİ YAMASI (Ximing Zhang):</b>\n"
+                "Ximing Zhang coretemp için yeni bir yama önerisi gönderdi. "
+                "Kendi i7-14700F donanımımızda inceleyip test edebilir veya eksik bulursak yorum yazabiliriz."
+            )
+        elif has_asaf:
+            parts.append("📝 <b>SENİN GÖNDERDİĞİN YAMA:</b> Listeye sunduğun resmi çekirdek yama önerisi.")
+        else:
+            parts.append(f"📝 <b>YENİ YAMA ÖNERİSİ:</b> {newest_author} tarafından listeye yeni bir coretemp yaması sunuldu.")
+    else:
+        parts.append(f"💬 <b>TARTIŞMA / YORUM:</b> {newest_author} yama tartışmasına teknik yanıt verdi.")
+        
+    # Yazarın son cevabından somut alıntı
+    if clean_reply:
+        quote = clean_reply
+        if len(quote) > 300:
+            quote = quote[:297] + "..."
+        parts.append(f"🗣️ <b>{newest_author} ne yazdı:</b>\n<i>\"{html.escape(quote)}\"</i>")
+        
+    return "\n\n".join(parts)
+
+
+def explain_patchwork(state, is_new, patch_name=""):
+    """Patchwork durumunu maintainer hedefine gore Turkce aciklar."""
+    state = (state or "").lower()
+    if is_new:
+        return (
+            "⏳ <b>PATCHWORK DURUMU: YENİ (New)</b>\n"
+            "Yama Patchwork sistemine yeni düştü, henüz maintainer tarafından karara bağlanmadı. "
+            "İnceleme ve test için sırada bekliyor."
+        )
+    if state == "accepted":
+        return (
+            "🎉 <b>PATCHWORK DURUMU: KABUL EDİLDİ (Accepted)!</b>\n"
+            "Maintainer yamayı onayladı ve çekirdeğe dahil etti. Senin yaman ise artık resmen Linux çekirdeğinin parçası demektir!"
+        )
+    if state == "rejected":
+        return (
+            "❌ <b>PATCHWORK DURUMU: REDDEDİLDİ (Rejected)</b>\n"
+            "Yama maintainer tarafından reddedildi, bu haliyle çekirdeğe girmeyecek."
+        )
+    if state == "superseded":
+        return (
+            "🔄 <b>PATCHWORK DURUMU: ESKİ SÜRÜM (Superseded)</b>\n"
+            "Bu yama daha yeni bir sürüm (v2/v3) geldiği için geçersiz kaldı, arşivlendi."
+        )
+    return f"ℹ️ <b>PATCHWORK DURUMU: {state.upper()}</b>\nYama inceleme sürecinde durum güncellendi."
+
+
+def explain_bugzilla(status, summary=""):
+    status_up = (status or "").upper()
+    if status_up in ("RESOLVED", "CLOSED", "VERIFIED"):
+        return (
+            "✅ <b>BUGZILLA DURUMU: ÇÖZÜLDÜ (Closed)</b>\n"
+            "Bildirilen donanım hatası kapatıldı, sorun çözülmüş sayılıyor."
+        )
+    return (
+        "🐛 <b>KERNEL BUGZILLA HATASI:</b>\n"
+        "Kullanıcılar tarafından çekirdekte gerçek bir donanım/sıcaklık sorunu bildirildi. "
+        "Bu hatayı kendi i7-14700F makinemizde inceleyip ilk yamayı sunmak maintainer yolunda en büyük kozdur!"
+    )
 
 
 def clamp_message(text, limit=MAX_MESSAGE_LEN):
@@ -523,11 +663,7 @@ def check_patchwork(conn, config, is_baseline, messages):
                 "source": "patchwork",
                 "id": p_id,
                 "date": patch.get("date") or "",
-                "text": with_explanation([
-                    f"🆕 <b>[patchwork]</b> {title}",
-                    web_url,
-                    f"{date_str} · {submitter} · {html.escape(p_state)}",
-                ], classify_patchwork(p_state, is_new=True)),
+                "text": f"🆕 <b>[patchwork]</b> {title}\n{web_url}\n📅 {date_str} · 👤 {submitter}\n\n" + explain_patchwork(p_state, is_new=True, patch_name=title),
             })
         elif p_state and p_state != old_state:
             mark_seen(conn, p_id, "patchwork", title, p_state)
@@ -539,11 +675,7 @@ def check_patchwork(conn, config, is_baseline, messages):
                 "source": "patchwork",
                 "id": p_id,
                 "date": patch.get("date") or "",
-                "text": with_explanation([
-                    f"🔄 <b>[patchwork]</b> {title}",
-                    web_url,
-                    f"durum: {html.escape(old_state or '?')} → {html.escape(p_state)}",
-                ], classify_patchwork(p_state, is_new=False), detail=p_state),
+                "text": f"🔄 <b>[patchwork]</b> {title}\n{web_url}\n📊 Durum Değişimi: {html.escape(old_state or "?")} → <b>{html.escape(p_state)}</b>\n\n" + explain_patchwork(p_state, is_new=False, patch_name=title),
             })
     return True
 
@@ -597,22 +729,27 @@ def lore_group_kind(group):
 
 
 def compose_lore_message(group):
-    """Bir thread'in tum yeni maillerini tek bildirim metnine cevirir."""
+    """Bir thread'in tum yeni maillerini tek ve derinlemesine Turkce bildirim metnine cevirir."""
     authors = ", ".join(group["authors"][:3])
     if len(group["authors"]) > 3:
         authors += f" +{len(group['authors']) - 3}"
     meta = f"{authors or '?'} · {group['date'][:10]}"
     if group["count"] > 1:
         meta += f" · {group['count']} yeni mail"
-    summary_line = short(group["summary"], SUMMARY_LIMIT)
-    lines = [f"📧 <b>[lore]</b> {html.escape(group['title'])}", group["link"], meta]
-    if summary_line:
-        lines.append(f"<i>{html.escape(summary_line)}</i>")
+        
+    explanation = analyze_lore_group(group)
+    
+    text = (
+        f"📧 <b>[lore]</b> {html.escape(group['title'])}\n"
+        f"{group['link']}\n"
+        f"📅 {meta}\n\n"
+        f"{explanation}"
+    )
     return {
         "source": "lore",
         "id": group["key"],
         "date": group["date"],
-        "text": clamp_message(with_explanation(lines, lore_group_kind(group))),
+        "text": clamp_message(text),
     }
 
 
@@ -693,11 +830,7 @@ def check_bugzilla(conn, config, is_baseline, messages):
             "source": "bugzilla",
             "id": b_id,
             "date": bug.get("last_change_time") or "",
-            "text": clamp_message(with_explanation([
-                f"🐛 <b>[bugzilla]</b> #{b_id} {html.escape(short(summary_raw, 140))}",
-                web_url,
-                f"{html.escape(status)} · {html.escape(creator)}",
-            ], classify_bugzilla(status))),
+            "text": clamp_message(f"🐛 <b>[bugzilla]</b> #{b_id} {html.escape(short(summary_raw, 140))}\n{web_url}\n📊 {html.escape(status)} · 👤 {html.escape(creator)}\n\n" + explain_bugzilla(status, summary_raw)),
         })
     return True
 

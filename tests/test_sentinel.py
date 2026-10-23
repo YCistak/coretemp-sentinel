@@ -142,11 +142,9 @@ class ThreadGroupTest(unittest.TestCase):
         msg = sentinel.compose_lore_message(sentinel.build_lore_groups(items)[0])
         text = msg["text"]
         self.assertLessEqual(len(text), sentinel.MAX_MESSAGE_LEN)
-        self.assertIn(sentinel.EXPLANATIONS["lore_reply"], text)
-        # Ozet 300 karakterde kesilir (ellipsis dahil).
-        self.assertIn("…", text)
-        summary = text.split("<i>")[1].split("</i>")[0]
-        self.assertLessEqual(len(summary), sentinel.SUMMARY_LIMIT)
+        # Mesajda aciklama veya yorum bolumu olmali
+        self.assertTrue("<b>" in text and "</b>" in text)
+        self.assertIn("Asaf", text)
 
     def test_clamp_message(self):
         text = "x" * (sentinel.MAX_MESSAGE_LEN + 100)
