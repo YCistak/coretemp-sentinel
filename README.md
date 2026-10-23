@@ -15,10 +15,42 @@ Her koşuda dört kaynağı tarar (hepsi **sadece coretemp** odaklı, genel hwmo
 | Kernel Bugzilla | `rest/bug?summary=coretemp` | özetinde coretemp geçen hatalar |
 | git.kernel.org | `.../linux.git/atom/drivers/hwmon/coretemp.c` | coretemp.c'ye dokunan commit'ler (Atom çökerse GitHub API + `GITHUB_TOKEN`) |
 
-Mesaj formatı kısa: `[kaynak] başlık — link` + tek satır özet. Bir koşuda en fazla
+Mesaj formatı kısa: `[kaynak] başlık` + link + tek satır özet + **boş satır + 2 cümlelik
+Türkçe açıklama**. Açıklama, mesajın tipine göre değişir (aşağıdaki tablo); kural tabanlı
+ve deterministiktir, LLM/API kullanmaz. Bir koşuda en fazla
 **10 mesaj** gider; fazlası en yeniden geriye doğru kesilir ve tek satır
 "N kayıt daha var" notu düşülür. Bir kaynak 4xx/5xx dönerse diğerleri çalışmaya devam eder
 (hata stderr'e yazılır, workflow fail olmaz); yalnız **tümü** birden çökerse çıkış kodu 1 olur.
+
+### Açıklama tipleri
+
+| Tip | Ne zaman | Türkçe açıklamanın özü |
+|---|---|---|
+| `lore_patch_new` | `[PATCH ...]` ile başlayan tek mail | yeni yama önerisi, incelenip test edilmeli |
+| `lore_patch_thread` | yeni yama + altına cevaplar | thread'in son mesajlarına bak |
+| `lore_applied` | gövdede `Applied.` | kabul edildi, hwmon-next kuyruğunda |
+| `lore_review_tag` | `Reviewed-by` / `Acked-by` / `Tested-by` | destek onayı, kabul olasılığı arttı |
+| `lore_changes` | `NACK`/`NAK`, `please fix`, `changes requested`, `v2 requested` | düzeltme istendi, v2 gerekli |
+| `lore_reply` | diğer cevaplar | tartışmayı bütün okumak gerek |
+| `patchwork_new` | yeni yama kaydı | henüz incelenmemiş, test edilebilir |
+| `patchwork_accepted` / `rejected` / `changes` / `superseded` | state değişimi | kabul / ret / düzeltme / yeni sürüm |
+| `patchwork_other` | diğer state'ler (`under-review`, `not-applicable`, …) | karar değil, süreci takip et |
+| `git_commit` | coretemp.c commit'i | mainline'a girdi, çakışma kontrolü |
+| `bugzilla_open` / `bugzilla_resolved` | yeni/güncel hata · RESOLVED/CLOSED | yeniden üretmeyi dene · çözümü teyit et |
+| `default` | bilinmeyen tip | nötr açıklama |
+
+Kurallar sırayla uygulanır: `Applied.` → review etiketi → değişiklik talebi → yeni yama →
+genel cevap. Açıklama her zaman **tam 2 cümle**; bilinmeyen tipte nötr varsayılan kullanılır.
+
+**Thread gruplama (lore):** aynı konudaki mailler tek bildirimde toplanır. Atom beslemesinde
+thread kimliği olmadığı için `Re:`/`Fw:` önekleri ve `[PATCH v3 2/4]` gibi etiketler
+temizlenip normalize edilmiş konu başlığı anahtar olarak kullanılır. Bildirimde temsilci
+olarak **en yeni mail** gösterilir: başlık + link + katılımcılar (en fazla 3 isim + `+N`) +
+`N yeni mail` + en yeni mailin 300 karaktere kısaltılmış özeti + 2 cümle açıklama.
+Açıklama tipi, en yeni mailin kararına göre seçilir (`Applied.` gibi net kararlar önce gelir).
+
+**Uzunluk:** mail özeti **300 karakterde** kesilir, mesajın tamamı Telegram'ın 4096 karakter
+sınırını aşarsa `clamp_message` ile kısaltılır.
 
 **Durum takibi:** `seen` tablosunda `state` kolonu vardır (eski DB'ler `ALTER TABLE` ile
 kendiliğinden güncellenir). Migration sonrası `state` değeri boş olan eski kayıtlar sessizce
@@ -94,7 +126,17 @@ SENTINEL_DB=./sentinel.db python3 sentinel.py
 **Kuru çalıştırma (Telegram atmaz, gerçek DB'ye dokunmaz):**
 
 ```bash
-DRY_RUN=1 python3 sentinel.py          # belleğe yazar, sadece mesajları basar
+DRY_RUN=1 python3 sentinel.py     # gerçek DB'nin /tmp kopyasıyla mesajları basar
+```
+
+Kuru koşu artık belleğe değil, `sentinel.db`'nin geçici bir kopyasına yazar; böylece gerçek
+state bozulmadan **gerçek kayıtlarla** "yeni mi, durum değişti mi" karşılaştırması görülür.
+Farklı bir DB denemek için `SENTINEL_DRY_DB=/yol/db` kullanılabilir.
+
+Testler:
+
+```bash
+python3 -m unittest discover -s tests -v   # ağ erişimi gerekmez
 ```
 
 Tek bir kaynağı denemek için: `python3 -c "import sentinel; ..."` ile ilgili
