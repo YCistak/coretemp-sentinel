@@ -248,7 +248,7 @@ def parse_atom(xml_text):
         content_el = entry.find("a:content", ATOM_NS)
         summary = ""
         if content_el is not None:
-            summary = " ".join("".join(content_el.itertext()).split())
+            summary = "\n".join(l.strip() for l in "".join(content_el.itertext()).splitlines() if l.strip())
         items.append({
             "id": item_id,
             "title": " ".join((entry.findtext("a:title", default="", namespaces=ATOM_NS) or "").split()),
@@ -426,7 +426,7 @@ def analyze_lore_group(group):
     
     # Tum gruptaki metinleri birlestir ve en yeni mesaji bul
     full_text = " ".join(item.get("summary", "") for item in items)
-    newest = items[-1] if items else {}
+    newest = max(items, key=lambda i: i.get("updated") or "") if items else {}
     newest_author = newest.get("author", "")
     newest_summary = newest.get("summary", "")
     
@@ -434,10 +434,13 @@ def analyze_lore_group(group):
     reply_lines = []
     for line in newest_summary.splitlines():
         line_s = line.strip()
-        if not line_s.startswith(">") and line_s:
-            if line_s in ("--", "---", "-- "):
-                break
-            reply_lines.append(line_s)
+        if not line_s or line_s.startswith(">") or line_s.startswith("&gt;"):
+            continue
+        if re.match(r"^On\s+.*wrote:", line_s, re.I):
+            continue
+        if line_s in ("--", "---", "-- "):
+            break
+        reply_lines.append(line_s)
     clean_reply = " ".join(reply_lines)
     
     # Onemli kisiler
@@ -713,6 +716,7 @@ def build_lore_groups(items):
             "summary": newest["summary"],
             "kinds": group["kinds"],
             "newest_kind": classify_lore(newest["title"], newest["summary"]),
+            "items": group["items"],
         })
     result.sort(key=lambda g: g["date"] or "", reverse=True)
     return result
