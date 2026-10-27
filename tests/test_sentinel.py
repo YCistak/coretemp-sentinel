@@ -200,5 +200,199 @@ class FormatTest(unittest.TestCase):
             "[PATCH v2] hwmon: (coretemp) X")
 
 
+
+# --------------------------------------------------------------------------
+# Kaynak-basi taban cizgisi, gonderim hatasi, hwmon-next, saglik sayaci
+# --------------------------------------------------------------------------
+
+from unittest import mock  # noqa: E402
+
+
+def make_config(**over):
+    cfg = {"telegram_token": "T", "chat_id": "C", "dry_run": False}
+    cfg.update(over)
+    return cfg
+
+
+def patch_json(i, name="hwmon: (coretemp) X", state="new", date="2026-10-20T00:00:00"):
+    return {"id": i, "name": name, "state": state, "date": date,
+            "submitter": {"name": "Biri"}, "web_url": f"https://p/{i}/"}
+
+
+class PatchworkTest(unittest.TestCase):
+    def setUp(self):
+        self.conn = sentinel.init_db(":memory:")
+        self.cfg = make_config(patchwork_queries=["q=coretemp", "q=nct6775"])
+
+    def run_check(self, by_query):
+        urls = []
+
+        def fake(url, **kw):
+            urls.append(url)
+            for q, data in by_query.items():
+                if q in url:
+                    return data
+            return []
+        msgs = []
+        with mock.patch.object(sentinel, "fetch_json", fake):
+            sentinel.check_patchwork(self.conn, self.cfg, False, msgs)
+        return urls, msgs
+
+    def test_url_has_order_and_per_page(self):
+        urls, _ = self.run_check({})
+        self.assertEqual(len(urls), 2)
+        for u in urls:
+            self.assertIn("order=-date", u)
+            self.assertIn("per_page=50", u)
+        self.assertTrue(any("q=nct6775" in u for u in urls))
+
+    def test_first_time_query_is_silent_then_loud(self):
+        _, msgs = self.run_check({"q=coretemp": [patch_json(1)], "q=nct6775": [patch_json(2)]})
+        self.assertEqual(msgs, [])
+        self.assertTrue(sentinel.is_seen(self.conn, "1", "patchwork"))
+        _, msgs = self.run_check({"q=coretemp": [patch_json(1), patch_json(3)]})
+        self.assertEqual([m["id"] for m in msgs], ["3"])
+
+    def test_new_query_baseline_does_not_flood(self):
+        self.run_check({"q=coretemp": [patch_json(1)]})
+        self.cfg["patchwork_queries"].append("submitter=a@b.c")
+        _, msgs = self.run_check({"q=coretemp": [patch_json(1)],
+                                  "submitter=": [patch_json(10), patch_json(11)]})
+        self.assertEqual(msgs, [])
+        self.assertTrue(sentinel.is_seen(self.conn, "10", "patchwork"))
+
+    def test_state_change_still_reported(self):
+        self.run_check({"q=coretemp": [patch_json(1)]})
+        _, msgs = self.run_check({"q=coretemp": [patch_json(1, state="accepted")]})
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("accepted", msgs[0]["text"])
+
+
+class DispatchTest(unittest.TestCase):
+    def setUp(self):
+        self.conn = sentinel.init_db(":memory:")
+        self.cfg = make_config()
+
+    def msg(self, i):
+        return {"source": "patchwork", "id": str(i), "date": f"2026-10-{i:02d}",
+                "text": "x", "marks": [(str(i), "patchwork", "t", "new")]}
+
+    def test_failed_send_is_not_marked_seen(self):
+        with mock.patch.object(sentinel, "send_telegram", return_value=False):
+            sent = sentinel.dispatch(self.conn, self.cfg, [self.msg(1)], False)
+        self.assertEqual(sent, 0)
+        self.assertFalse(sentinel.is_seen(self.conn, "1", "patchwork"))
+
+    def test_ok_send_is_marked_seen(self):
+        with mock.patch.object(sentinel, "send_telegram", return_value=True):
+            sent = sentinel.dispatch(self.conn, self.cfg, [self.msg(1)], False)
+        self.assertEqual(sent, 1)
+        self.assertTrue(sentinel.is_seen(self.conn, "1", "patchwork"))
+
+    def test_dropped_over_limit_are_marked(self):
+        cfg = make_config(max_messages=1)
+        with mock.patch.object(sentinel, "send_telegram", return_value=True):
+            sentinel.dispatch(self.conn, cfg, [self.msg(1), self.msg(2)], False)
+        self.assertTrue(sentinel.is_seen(self.conn, "1", "patchwork"))
+        self.assertTrue(sentinel.is_seen(self.conn, "2", "patchwork"))
+
+
+def atom(entries):
+    body = "".join(
+        f"<entry><title>{t}</title><updated>{d}</updated>"
+        f"<author><name>{a}</name></author>"
+        f"<link rel='alternate' href='http://g/commit/?id={sha}'/>"
+        f"<id>urn:sha1:{sha}</id><content>{c}</content></entry>"
+        for t, d, a, sha, c in entries)
+    return f"<feed xmlns='http://www.w3.org/2005/Atom'>{body}</feed>"
+
+
+class GitTest(unittest.TestCase):
+    TREES = [
+        {"tree": "mainline", "label": "mainline", "atom": "http://m/{path}", "api": None},
+        {"tree": "hwmon-next", "label": "hwmon-next — test zamanı",
+         "atom": "http://n/{path}", "api": None},
+    ]
+
+    def setUp(self):
+        self.conn = sentinel.init_db(":memory:")
+        self.cfg = make_config(git_trees=self.TREES, git_files=["f.c"])
+        self.feeds = {}
+
+    def run_check(self):
+        def fake(url, **kw):
+            return self.feeds.get(url.split("/")[2], atom([]))
+        msgs = []
+        with mock.patch.object(sentinel, "http_get", fake):
+            sentinel.check_git_commits(self.conn, self.cfg, False, msgs)
+        return msgs
+
+    def test_hwmon_next_message_and_star(self):
+        self.run_check()  # bos besleme -> taban cizgisi
+        self.feeds["n"] = atom([("hwmon: X", "2026-10-20T00:00:00Z", "Biri", "aaa",
+                                 "Tested-by: Asaf Nuri Bertizlio&#287;lu")])
+        msgs = self.run_check()
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("hwmon-next — test zamanı", msgs[0]["text"])
+        self.assertIn("⭐", msgs[0]["text"])
+
+    def test_rebase_does_not_renotify_but_mainline_does(self):
+        self.run_check()
+        entry = ("hwmon: X", "2026-10-20T00:00:00Z", "Biri", "aaa", "")
+        self.feeds["n"] = atom([entry])
+        msgs = self.run_check()
+        for m in msgs:
+            sentinel.apply_marks(self.conn, m)
+        # rebase: sha degisti, baslik+yazar ayni
+        self.feeds["n"] = atom([("hwmon: X", "2026-10-21T00:00:00Z", "Biri", "bbb", "")])
+        self.assertEqual(self.run_check(), [])
+        # mainline'a gecis ayri bildirim
+        self.feeds["m"] = atom([("hwmon: X", "2026-10-22T00:00:00Z", "Biri", "ccc", "")])
+        msgs = self.run_check()
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("[git · mainline]", msgs[0]["text"])
+        self.assertIn("mainline'a geçti", msgs[0]["text"])
+
+    def test_no_star_without_word(self):
+        self.run_check()
+        self.feeds["m"] = atom([("hwmon: Y", "2026-10-20T00:00:00Z", "Biri", "aaa", "")])
+        msgs = self.run_check()
+        self.assertNotIn("⭐", msgs[0]["text"])
+
+
+class HealthTest(unittest.TestCase):
+    def setUp(self):
+        self.conn = sentinel.init_db(":memory:")
+        self.cfg = make_config()
+        sentinel._HEALTH.clear()
+
+    def run_health(self, ok):
+        sentinel._HEALTH.clear()
+        sentinel.note_health("kaynak", ok)
+        with mock.patch.object(sentinel, "send_telegram", return_value=True) as m:
+            sentinel.update_health(self.conn, self.cfg, "T", "C")
+        return m
+
+    def test_alert_once_after_six_and_recovery_once(self):
+        for _ in range(5):
+            self.assertFalse(self.run_health(False).called)
+        self.assertTrue(self.run_health(False).called)       # 6. basarisizlik
+        self.assertFalse(self.run_health(False).called)      # tekrar uyarma yok
+        m = self.run_health(True)
+        self.assertTrue(m.called)
+        self.assertIn("tekrar bağlandı", m.call_args[0][2])
+        self.assertFalse(self.run_health(True).called)
+
+
+class MetaTest(unittest.TestCase):
+    def test_meta_roundtrip(self):
+        conn = sentinel.init_db(":memory:")
+        self.assertIsNone(sentinel.meta_get(conn, "k"))
+        sentinel.meta_set(conn, "k", 3)
+        self.assertEqual(sentinel.meta_get(conn, "k"), "3")
+        sentinel.meta_del(conn, "k")
+        self.assertIsNone(sentinel.meta_get(conn, "k"))
+
+
 if __name__ == "__main__":
     unittest.main()

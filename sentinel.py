@@ -2,11 +2,13 @@
 """
 Coretemp Sentinel - Linux kernel coretemp surucu radarı.
 
-Yalnizca coretemp ile ilgili kaynaklari izler:
-  - Patchwork (linux-hwmon, q=coretemp)  -> yeni yama + durum (state) degisimi
-  - lore.kernel.org (linux-hwmon, q=coretemp) -> mail listesi
-  - Kernel Bugzilla (summary=coretemp)
-  - git.kernel.org coretemp.c commit'leri
+coretemp ve nct6775 ile ilgili kaynaklari izler:
+  - Patchwork (linux-hwmon; q=coretemp, q=nct6775, submitter=kendi e-postan)
+    -> yeni yama + durum (state) degisimi
+  - lore.kernel.org (linux-hwmon; coretemp, nct6775) -> mail listesi
+  - Kernel Bugzilla (summary=coretemp, summary=nct6775)
+  - git.kernel.org commit'leri: mainline (torvalds) + hwmon-next (groeck)
+    coretemp.c, nct6775-core.c, nct6775-platform.c
 
 Tek bagimlilik Python 3 standart kutuphanesidir.
 DRY_RUN=1 ile telegram atmadan, gecici (bellek ici) DB ile sadece parse eder.
@@ -21,6 +23,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,14 +38,32 @@ ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 
 # Varsayilan kaynak adresleri. Hepsi ortam degiskeni veya config dosyasi ile
 # ezilebilir (bkz. resolve_setting).
+# Patchwork en ESKI yamalari dondurur; bu yuzden her zaman order=-date verilir.
+# *_url alanlari taban adrestir, sorgu parcalari (q=..., submitter=...) sonradan eklenir.
 DEFAULTS = {
-    "patchwork_url": "https://patchwork.kernel.org/api/1.2/patches/?project=linux-hwmon&q=coretemp",
-    "lore_url": "https://lore.kernel.org/linux-hwmon/?q=coretemp&x=A",
-    "bugzilla_url": "https://bugzilla.kernel.org/rest/bug?summary=coretemp&limit=20&order=changeddate%20desc",
-    "git_atom_url": ("https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/"
-                     "linux.git/atom/drivers/hwmon/coretemp.c"),
-    "git_api_url": ("https://api.github.com/repos/torvalds/linux/commits"
-                    "?path=drivers/hwmon/coretemp.c&per_page=15"),
+    "patchwork_url": ("https://patchwork.kernel.org/api/1.2/patches/"
+                      "?project=linux-hwmon&order=-date&per_page=50"),
+    "patchwork_queries": ["q=coretemp", "q=nct6775", "submitter=ycistak@gmail.com"],
+    "lore_url": "https://lore.kernel.org/linux-hwmon/?x=A",
+    "lore_terms": ["coretemp", "nct6775"],
+    "bugzilla_url": "https://bugzilla.kernel.org/rest/bug?limit=20&order=changeddate%20desc",
+    "bugzilla_terms": ["coretemp", "nct6775"],
+    "git_files": ["drivers/hwmon/coretemp.c",
+                  "drivers/hwmon/nct6775-core.c",
+                  "drivers/hwmon/nct6775-platform.c"],
+    "git_trees": [
+        {"tree": "mainline", "label": "mainline",
+         "atom": ("https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/"
+                  "linux.git/atom/{path}"),
+         "api": ("https://api.github.com/repos/torvalds/linux/commits"
+                 "?path={path}&per_page=15")},
+        {"tree": "hwmon-next", "label": "hwmon-next — test zamanı",
+         "atom": ("https://git.kernel.org/pub/scm/linux/kernel/git/groeck/"
+                  "linux-staging.git/atom/{path}?h=hwmon-next"),
+         "api": None},
+    ],
+    "star_words": ["bertizlio"],
+    "alert_after": 6,
     "lore_days": 30,
     "max_messages": 10,
 }
@@ -52,8 +73,6 @@ ENV_KEYS = {
     "patchwork_url": "SENTINEL_PATCHWORK_URL",
     "lore_url": "SENTINEL_LORE_URL",
     "bugzilla_url": "SENTINEL_BUGZILLA_URL",
-    "git_atom_url": "SENTINEL_GIT_ATOM_URL",
-    "git_api_url": "SENTINEL_GIT_API_URL",
 }
 
 
@@ -142,6 +161,8 @@ def init_db(db_path, dry_run=False):
             created_at TEXT
         )
     """)
+    # Kaynak-basi taban cizgisi, saglik sayaclari ve tek seferlik bayraklar.
+    cur.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
     # Eski DB'yi bozmadan state kolonu ekle (migration).
     cur.execute("PRAGMA table_info(seen)")
     columns = {row[1] for row in cur.fetchall()}
@@ -181,6 +202,23 @@ def mark_seen(conn, item_id, source, title, state=None):
         "VALUES (?, ?, ?, ?, ?)",
         (str(item_id), source, title, datetime.now(timezone.utc).isoformat(), state),
     )
+    conn.commit()
+
+
+def meta_get(conn, key, default=None):
+    cur = conn.cursor()
+    cur.execute("SELECT v FROM meta WHERE k = ?", (key,))
+    row = cur.fetchone()
+    return default if row is None else row[0]
+
+
+def meta_set(conn, key, value):
+    conn.execute("INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)", (key, str(value)))
+    conn.commit()
+
+
+def meta_del(conn, key):
+    conn.execute("DELETE FROM meta WHERE k = ?", (key,))
     conn.commit()
 
 
@@ -409,8 +447,10 @@ _RE_REPLY_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd)\s*:\s*)+", re.I)
 def with_explanation(lines, kind, detail=""):
     """Govde satirlarinin sonuna bos satir + aciklama ekler."""
     body = "\n".join(lines).rstrip()
-    if kind == "git_commit":
-        aciklama = "💾 <b>GIT COMMIT:</b> coretemp sürücüsüne mainline çekirdekte yeni bir commit merge edildi. Değişikliğin senin yamanla veya sürücü mantığıyla ilişkisini inceleyebilirsin."
+    if kind == "git_next":
+        aciklama = "🧪 <b>HWMON-NEXT:</b> Commit Guenter Roeck'un hwmon-next ağacına girdi, mainline'dan önce test edebilirsin. Bu ağaç yeniden yazılabilir (rebase); mainline'a geçince ayrıca haber vereceğim."
+    elif kind == "git_commit":
+        aciklama = "💾 <b>GIT COMMIT:</b> coretemp/nct6775 sürücüsüne mainline çekirdekte yeni bir commit merge edildi. Değişikliğin senin yamanla veya sürücü mantığıyla ilişkisini inceleyebilirsin."
     else:
         aciklama = f"ℹ️ <b>DURUM:</b> {kind}"
     return f"{body}\n\n{aciklama}"
@@ -593,66 +633,161 @@ def display_subject(title):
 # Bildirim kuyrugu
 # --------------------------------------------------------------------------
 
-def send_telegram(token, chat_id, text):
+def _telegram_post(token, chat_id, text, html_mode=True):
+    """Tek istek. (ok, hata_kodu, retry_after) doner; token asla yazdirilmaz."""
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
+    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    if html_mode:
+        payload["parse_mode"] = "HTML"
     data = urllib.parse.urlencode(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"User-Agent": UA})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            body = json.loads(resp.read().decode("utf-8"))
+        return bool(body.get("ok")), None, 0
+    except urllib.error.HTTPError as e:
+        retry_after = 0
+        try:
+            err = json.loads(e.read().decode("utf-8"))
+            retry_after = int((err.get("parameters") or {}).get("retry_after") or 0)
+        except Exception:
+            pass
+        print(f"Telegram send error: HTTP {e.code}", file=sys.stderr)
+        return False, e.code, retry_after
     except Exception as e:
-        print(f"Telegram send error: {e}", file=sys.stderr)
-        return None
+        # URLError metni adres icerebilir; yalnizca tur adi yazilir.
+        print(f"Telegram send error: {type(e).__name__}", file=sys.stderr)
+        return False, 0, 0
+
+
+def send_telegram(token, chat_id, text):
+    """Mesaji yollar; basariliysa True. 429'da bir kez bekleyip tekrar dener,
+    HTML ayristirma hatasinda (400) etiketsiz duz metinle tekrar dener."""
+    ok, code, retry_after = _telegram_post(token, chat_id, text)
+    if not ok and code == 429 and 0 < retry_after <= 30:
+        time.sleep(retry_after + 1)
+        ok, code, retry_after = _telegram_post(token, chat_id, text)
+    if not ok and code == 400:
+        plain = html.unescape(re.sub(r"</?[a-zA-Z][^>]*>", "", text))
+        ok, code, _ = _telegram_post(token, chat_id, plain, html_mode=False)
+    return ok
+
+
+def apply_marks(conn, msg):
+    """Mesaja bagli seen kayitlarini DB'ye isler (gonderim basarili olunca)."""
+    for item_id, source, title, state in msg.get("marks", []):
+        mark_seen(conn, item_id, source, title, state)
 
 
 def dispatch(conn, config, messages, is_baseline):
     """Bildirimleri gonderir; tek kosuda en fazla max_messages mesaj.
 
-    messages: [{"source","id","date","text"}] — en yeni once gonderilir,
+    messages: [{"source","id","date","text","marks"}] — en yeni once gonderilir,
     limiti asanlar icin tek satir "N kayit daha var" notu dusulur.
+    Seen isareti ("marks") yalnizca mesaj BASARIYLA gidince islenir; gonderilemeyen
+    kayit sonraki kosuda tekrar denenir. Limiti asan (filtrelenen) kayitlar ve
+    baseline kosusu kayitlari ise hemen isaretlenir.
     """
     if is_baseline or not messages:
+        for msg in messages:
+            apply_marks(conn, msg)
         return 0
 
     max_messages = int(resolve_setting(config, "max_messages"))
     ordered = sorted(messages, key=lambda m: m.get("date") or "", reverse=True)
     to_send, dropped = ordered[:max_messages], ordered[max_messages:]
 
+    sent = 0
     for msg in to_send:
         text = clamp_message(msg["text"])
         if config.get("dry_run"):
             print(f"\n--- DRY_RUN mesaj ({msg['source']}) [{len(text)} karakter] ---\n{text}")
+            ok = True
         else:
-            send_telegram(config["telegram_token"], config["chat_id"], text)
+            ok = send_telegram(config["telegram_token"], config["chat_id"], text)
+        if ok:
+            apply_marks(conn, msg)
+            sent += 1
+        else:
+            print(f"[uyari] {msg['source']} mesaji gonderilemedi, sonraki kosuda tekrar denenecek.",
+                  file=sys.stderr)
 
+    for msg in dropped:
+        apply_marks(conn, msg)
     if dropped:
         note = f"ℹ️ <b>{len(dropped)} kayıt daha var</b> (bir sonraki koşuda gönderilmeyecek, filtrelendi)."
         if config.get("dry_run"):
             print(f"\n--- DRY_RUN not ---\n{note}")
         else:
             send_telegram(config["telegram_token"], config["chat_id"], note)
-    return len(to_send)
+    return sent
 
 
 # --------------------------------------------------------------------------
 # Kaynaklar
 # --------------------------------------------------------------------------
 
-def check_patchwork(conn, config, is_baseline, messages):
-    """Yeni coretemp yamasi + ayni yamanin state degisimi."""
-    url = resolve_setting(config, "patchwork_url")
-    data = fetch_json(url)
-    if data is None:
-        return False
+# Saglik (kaynak ulasilabilirligi) ve bonus mesaj icin kosu-ici durum.
+_HEALTH = {}        # anahtar -> son denemede ulasildi mi
+MY_PATCHES = []     # kullanicinin kendi yamalari (submitter sorgusu)
+STARRED = []        # ⭐ isaretli git commit'leri (tree, baslik, tarih)
 
-    for patch in data:
-        p_id = str(patch.get("id"))
+STATE_TR = {
+    "accepted": "kabul edildi", "new": "yeni", "rejected": "reddedildi",
+    "changes-requested": "değişiklik istendi", "superseded": "eski sürüm",
+    "under-review": "incelemede", "rfc": "RFC", "not-applicable": "uygulanamaz",
+    "handled-elsewhere": "başka yerde ele alındı", "deferred": "ertelendi",
+}
+
+
+def note_health(key, ok):
+    _HEALTH[key] = bool(ok)
+
+
+def first_time(conn, key):
+    """Bu sorgu/kaynak anahtari daha once hic basariyla islenmediyse True.
+
+    Ilk islemede donen kayitlar mesajsiz (sessizce) gorulmus isaretlenir; boylece
+    yeni eklenen bir sorgu eski kayitlari 'yeni' diye yagdirmaz.
+    """
+    return meta_get(conn, "init:" + key) is None
+
+
+def finish_key(conn, key):
+    meta_set(conn, "init:" + key, "1")
+
+
+def check_patchwork(conn, config, is_baseline, messages):
+    """Yeni yama + ayni yamanin state degisimi (coretemp, nct6775, kendi yamalarin).
+
+    Sorgular order=-date ile en yeniden eskiye gelir (yoksa API en eski yamalari verir).
+    """
+    base = resolve_setting(config, "patchwork_url")
+    queries = resolve_setting(config, "patchwork_queries")
+    patches = {}        # id -> yama
+    loud = set()        # taban cizgisi gecmis sorgulardan gelen id'ler
+    ok_keys = []
+    all_ok = True
+
+    for q in queries:
+        key = "patchwork:" + q
+        data = fetch_json(base + ("&" if "?" in base else "?") + q)
+        if not isinstance(data, list):
+            note_health(key, False)
+            all_ok = False
+            continue
+        note_health(key, True)
+        ok_keys.append(key)
+        silent = first_time(conn, key)
+        for patch in data:
+            p_id = str(patch.get("id"))
+            patches[p_id] = patch
+            if not silent:
+                loud.add(p_id)
+            if q.startswith("submitter="):
+                MY_PATCHES.append(patch)
+
+    for p_id, patch in patches.items():
         p_state = patch.get("state") or ""
         title = html.escape(patch.get("name") or "Bilinmeyen Yama")
         submitter = html.escape((patch.get("submitter") or {}).get("name") or "Bilinmiyor")
@@ -661,26 +796,34 @@ def check_patchwork(conn, config, is_baseline, messages):
 
         exists, old_state = get_seen_state(conn, p_id, "patchwork")
         if not exists:
-            mark_seen(conn, p_id, "patchwork", title, p_state)
-            messages.append({
-                "source": "patchwork",
-                "id": p_id,
-                "date": patch.get("date") or "",
-                "text": f"🆕 <b>[patchwork]</b> {title}\n{web_url}\n📅 {date_str} · 👤 {submitter}\n\n" + explain_patchwork(p_state, is_new=True, patch_name=title),
-            })
-        elif p_state and p_state != old_state:
-            mark_seen(conn, p_id, "patchwork", title, p_state)
-            # state'i henuz izlenmeyen eski kayitlar (migration sonrasi NULL)
-            # sessizce doldurulur; aksi halde ilk kosuda 30 sahte degisim mesaji gider.
-            if not old_state:
+            if p_id not in loud:
+                # Yeni sorgunun eski gecmisi: sessizce gorulmus say.
+                mark_seen(conn, p_id, "patchwork", title, p_state)
                 continue
             messages.append({
                 "source": "patchwork",
                 "id": p_id,
                 "date": patch.get("date") or "",
+                "marks": [(p_id, "patchwork", title, p_state)],
+                "text": f"🆕 <b>[patchwork]</b> {title}\n{web_url}\n📅 {date_str} · 👤 {submitter}\n\n" + explain_patchwork(p_state, is_new=True, patch_name=title),
+            })
+        elif p_state and p_state != old_state:
+            # state'i henuz izlenmeyen eski kayitlar (migration sonrasi NULL)
+            # sessizce doldurulur; aksi halde ilk kosuda 30 sahte degisim mesaji gider.
+            if not old_state:
+                mark_seen(conn, p_id, "patchwork", title, p_state)
+                continue
+            messages.append({
+                "source": "patchwork",
+                "id": p_id,
+                "date": patch.get("date") or "",
+                "marks": [(p_id, "patchwork", title, p_state)],
                 "text": f"🔄 <b>[patchwork]</b> {title}\n{web_url}\n📊 Durum Değişimi: {html.escape(old_state or "?")} → <b>{html.escape(p_state)}</b>\n\n" + explain_patchwork(p_state, is_new=False, patch_name=title),
             })
-    return True
+
+    for key in ok_keys:
+        finish_key(conn, key)
+    return all_ok
 
 
 def build_lore_groups(items):
@@ -754,149 +897,275 @@ def compose_lore_message(group):
         "id": group["key"],
         "date": group["date"],
         "text": clamp_message(text),
+        "marks": [(i["id"], "lore", i["title"], None) for i in group["items"]],
     }
 
 
 def check_lore(conn, config, is_baseline, messages):
-    """linux-hwmon lore aramasinda 'coretemp' gecen mailler (thread bazli).
+    """linux-hwmon lore aramasinda coretemp/nct6775 gecen mailler (thread bazli).
 
-    Feed sorgusu (q=coretemp&x=A) 200 kayit ve yillara yayilan gecmis dondurur;
-    bu yuzden her zaman son lore_days gun ile sinirlanir, geriye donuk spam olmaz.
-    Ayni thread'e ait yeni mailler tek bildirimde toplanir.
+    Feed sorgusu 200 kayit ve yillara yayilan gecmis dondurur; bu yuzden her
+    zaman son lore_days gun ile sinirlanir, geriye donuk spam olmaz. Ayni thread'e
+    ait yeni mailler tek bildirimde toplanir. Yeni eklenen bir arama terimi
+    ilk kosuda sessizce taban cizgisi olur.
     """
-    url = resolve_setting(config, "lore_url")
-    body = http_get(url, timeout=30)
-    if body is None:
-        return False
-    items = parse_atom(body)
-    if items is None:
-        return False
-
+    base = resolve_setting(config, "lore_url")
     days = int(resolve_setting(config, "lore_days"))
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-
+    all_ok = True
+    ok_keys = []
     new_items = []
-    for item in items:
-        title_raw = item["title"]
-        summary_raw = item["summary"]
-        # Besleme sorgusu zaten daraltiyor; yine de yerelde dogrula.
-        if "coretemp" not in (title_raw + " " + summary_raw).lower():
-            continue
+    queued = set()
 
-        date = parse_iso(item["updated"])
-        if date is None or date < cutoff:
+    for term in resolve_setting(config, "lore_terms"):
+        key = "lore:" + term
+        body = http_get(base + ("&" if "?" in base else "?") + "q=" + urllib.parse.quote(term), timeout=30)
+        items = parse_atom(body) if body is not None else None
+        if items is None:
+            note_health(key, False)
+            all_ok = False
             continue
+        note_health(key, True)
+        ok_keys.append(key)
+        silent = first_time(conn, key)
 
-        m_id = item["id"] or item["link"]
-        if is_seen(conn, m_id, "lore"):
-            continue
-        mark_seen(conn, m_id, "lore", title_raw, None)
-        new_items.append({
-            "id": m_id,
-            "title": title_raw,
-            "link": item["link"],
-            "updated": item["updated"],
-            "author": item["author"],
-            "summary": summary_raw,
-        })
+        for item in items:
+            title_raw = item["title"]
+            summary_raw = item["summary"]
+            # Besleme sorgusu zaten daraltiyor; yine de yerelde dogrula.
+            if term not in (title_raw + " " + summary_raw).lower():
+                continue
+            date = parse_iso(item["updated"])
+            if date is None or date < cutoff:
+                continue
+            m_id = item["id"] or item["link"]
+            if m_id in queued or is_seen(conn, m_id, "lore"):
+                continue
+            queued.add(m_id)
+            if silent:
+                mark_seen(conn, m_id, "lore", title_raw, None)
+                continue
+            new_items.append({
+                "id": m_id,
+                "title": title_raw,
+                "link": item["link"],
+                "updated": item["updated"],
+                "author": item["author"],
+                "summary": summary_raw,
+            })
 
     for group in build_lore_groups(new_items):
         messages.append(compose_lore_message(group))
-    return True
+    for key in ok_keys:
+        finish_key(conn, key)
+    return all_ok
 
 
 def check_bugzilla(conn, config, is_baseline, messages):
-    """Kernel Bugzilla: yalnizca ozetinde 'coretemp' gecen kayitlar.
+    """Kernel Bugzilla: yalnizca ozetinde coretemp/nct6775 gecen kayitlar."""
+    base = resolve_setting(config, "bugzilla_url")
+    all_ok = True
+    ok_keys = []
+    queued = set()
 
-    Eski surumdeki component=Hardware Monitoring + anahtar kelime filtresi
-    yerine dar bir summary sorgusu kullanilir; boylece ilgisiz hwmon
-    gurultusu gelmez. Eski generic kayitlar DB'de kalir, temizlenmez.
-    """
-    url = resolve_setting(config, "bugzilla_url")
-    data = fetch_json(url)
-    if data is None or "bugs" not in data:
-        return False
-
-    for bug in data.get("bugs", []):
-        b_id = str(bug.get("id"))
-        summary_raw = bug.get("summary") or ""
-        if "coretemp" not in summary_raw.lower():
+    for term in resolve_setting(config, "bugzilla_terms"):
+        key = "bugzilla:" + term
+        data = fetch_json(base + ("&" if "?" in base else "?") + "summary=" + urllib.parse.quote(term))
+        if data is None or "bugs" not in data:
+            note_health(key, False)
+            all_ok = False
             continue
-        status = bug.get("status") or ""
-        creator = bug.get("creator") or "Bilinmiyor"
-        web_url = f"https://bugzilla.kernel.org/show_bug.cgi?id={b_id}"
+        note_health(key, True)
+        ok_keys.append(key)
+        silent = first_time(conn, key)
 
-        if is_seen(conn, b_id, "bugzilla"):
-            continue
-        mark_seen(conn, b_id, "bugzilla", summary_raw, status)
+        for bug in data.get("bugs", []):
+            b_id = str(bug.get("id"))
+            summary_raw = bug.get("summary") or ""
+            if term not in summary_raw.lower():
+                continue
+            if b_id in queued or is_seen(conn, b_id, "bugzilla"):
+                continue
+            queued.add(b_id)
+            status = bug.get("status") or ""
+            if silent:
+                mark_seen(conn, b_id, "bugzilla", summary_raw, status)
+                continue
+            creator = bug.get("creator") or "Bilinmiyor"
+            web_url = f"https://bugzilla.kernel.org/show_bug.cgi?id={b_id}"
+            messages.append({
+                "source": "bugzilla",
+                "id": b_id,
+                "date": bug.get("last_change_time") or "",
+                "marks": [(b_id, "bugzilla", summary_raw, status)],
+                "text": clamp_message(f"🐛 <b>[bugzilla]</b> #{b_id} {html.escape(short(summary_raw, 140))}\n{web_url}\n📊 {html.escape(status)} · 👤 {html.escape(creator)}\n\n" + explain_bugzilla(status, summary_raw)),
+            })
+    for key in ok_keys:
+        finish_key(conn, key)
+    return all_ok
 
-        messages.append({
-            "source": "bugzilla",
-            "id": b_id,
-            "date": bug.get("last_change_time") or "",
-            "text": clamp_message(f"🐛 <b>[bugzilla]</b> #{b_id} {html.escape(short(summary_raw, 140))}\n{web_url}\n📊 {html.escape(status)} · 👤 {html.escape(creator)}\n\n" + explain_bugzilla(status, summary_raw)),
+
+def git_commit_id(tree, author, title):
+    """hwmon-next rebase edilebilir (sha degisir); kimlik agac + yazar + baslik."""
+    return f"{tree}|{author}|{title}"
+
+
+def fetch_git_items(tree_cfg, path):
+    """Bir agac/dosya icin commit listesi. Atom, olmazsa (varsa) GitHub API."""
+    atom_url = tree_cfg["atom"].format(path=path)
+    body = http_get(atom_url, timeout=30)
+    items = parse_atom(body) if body is not None else None
+    # Anubis korumasi HTML dondururse ayristirma basarisiz olur -> None
+    if items:
+        return items
+    api = tree_cfg.get("api")
+    if not api:
+        return items  # None (ulasilamadi) ya da bos ama gecerli liste
+    # Token SADECE istek basliginda kullanilir, hicbir yere yazilmaz.
+    data = fetch_json(api.format(path=path), auth_token=os.environ.get("GITHUB_TOKEN") or None)
+    if not data:
+        return None
+    items = []
+    for c in data:
+        commit = c.get("commit") or {}
+        items.append({
+            "id": c.get("sha") or "",
+            "title": " ".join((commit.get("message") or "").splitlines()[:1]),
+            "link": c.get("html_url") or "",
+            "updated": ((commit.get("committer") or {}).get("date") or ""),
+            "author": ((commit.get("author") or {}).get("name") or ""),
+            "summary": " ".join((commit.get("message") or "").splitlines()[1:]).strip(),
         })
-    return True
+    return items
 
 
 def check_git_commits(conn, config, is_baseline, messages):
-    """drivers/hwmon/coretemp.c commit'leri.
+    """coretemp / nct6775 dosyalarinin commit'leri: mainline + hwmon-next.
 
-    Tercih: git.kernel.org Atom (kimlik dogrulama/rate limit yok).
-    Basarisizsa GitHub API'ye duser; token SADECE istek basliginda kullanilir,
-    hicbir yere yazilmaz.
+    Her (agac, dosya) cifti kendi taban cizgisine sahiptir. Ayni commit mainline'a
+    gecince ayri bir bildirim olarak gider.
     """
-    atom_url = resolve_setting(config, "git_atom_url")
-    items = None
-    body = http_get(atom_url, timeout=30)
-    if body is not None:
-        items = parse_atom(body)
+    star_words = [w.lower() for w in resolve_setting(config, "star_words")]
+    all_ok = True
+    ok_keys = []
+    queued = set()
 
-    if not items:
-        api_url = resolve_setting(config, "git_api_url")
-        token = os.environ.get("GITHUB_TOKEN") or None
-        data = fetch_json(api_url, auth_token=token)
-        if not data:
-            return False
-        items = []
-        for c in data:
-            commit = c.get("commit") or {}
-            items.append({
-                "id": c.get("sha") or "",
-                "title": " ".join((commit.get("message") or "").splitlines()[:1]),
-                "link": c.get("html_url") or "",
-                "updated": ((commit.get("committer") or {}).get("date") or ""),
-                "author": ((commit.get("author") or {}).get("name") or ""),
-                "summary": " ".join((commit.get("message") or "").splitlines()[1:]).strip(),
-            })
+    for tree_cfg in resolve_setting(config, "git_trees"):
+        tree = tree_cfg["tree"]
+        for path in resolve_setting(config, "git_files"):
+            key = f"git:{tree}:{path}"
+            items = fetch_git_items(tree_cfg, path)
+            if items is None:
+                note_health(key, False)
+                all_ok = False
+                continue
+            note_health(key, True)
+            ok_keys.append(key)
+            silent = first_time(conn, key)
 
-    for item in items:
-        # Atom id'si "urn:sha1:<sha>", link ise ".../commit/?id=<sha>" biciminde;
-        # DB'de kisa ve kararli kimlik olarak duz sha tutulur.
-        sha = item["id"]
-        if sha.startswith("urn:sha1:"):
-            sha = sha[len("urn:sha1:"):]
-        if "id=" in item["link"]:
-            sha = item["link"].split("id=")[-1] or sha
-        if not sha or is_seen(conn, sha, "git"):
+            for item in items:
+                # Atom id'si "urn:sha1:<sha>", link ise ".../commit/?id=<sha>" biciminde.
+                sha = item["id"]
+                if sha.startswith("urn:sha1:"):
+                    sha = sha[len("urn:sha1:"):]
+                if "id=" in item["link"]:
+                    sha = item["link"].split("id=")[-1] or sha
+                title_raw = item["title"]
+                author = item["author"]
+                haystack = f"{title_raw} {author} {item['summary']}".lower()
+                starred = any(w in haystack for w in star_words)
+                if starred:
+                    STARRED.append((tree_cfg["label"], title_raw, item["updated"][:10]))
+
+                cid = git_commit_id(tree, author, title_raw)
+                if not sha or cid in queued or is_seen(conn, cid, "git"):
+                    continue
+                # Eski surumde mainline coretemp commit'leri duz sha ile tutuluyordu.
+                if tree == "mainline" and is_seen(conn, sha, "git"):
+                    continue
+                queued.add(cid)
+                if silent:
+                    mark_seen(conn, cid, "git", title_raw, None)
+                    continue
+
+                lines = [
+                    f"{'⭐ ' if starred else ''}💾 <b>[git · {html.escape(tree_cfg['label'])}]</b> {html.escape(title_raw)}",
+                    item["link"],
+                    f"{item['updated'][:10]} · {html.escape(author or '?')}",
+                    f"📄 <code>{html.escape(path)}</code> · <code>{sha[:12]}</code>",
+                ]
+                if tree == "mainline" and is_seen(conn, git_commit_id("hwmon-next", author, title_raw), "git"):
+                    lines.append("🚀 hwmon-next'ten mainline'a geçti.")
+                kind = "git_next" if tree == "hwmon-next" else "git_commit"
+                messages.append({
+                    "source": "git",
+                    "id": cid,
+                    "date": item["updated"],
+                    "marks": [(cid, "git", title_raw, None)],
+                    "text": clamp_message(with_explanation(lines, kind)),
+                })
+    for key in ok_keys:
+        finish_key(conn, key)
+    return all_ok
+
+
+def notify(config, token, chat_id, text):
+    """Tek mesaj yollar (dry_run'da yazdirir); basariliysa True."""
+    if config.get("dry_run"):
+        print(f"\n--- DRY_RUN mesaj ---\n{text}")
+        return True
+    return send_telegram(token, chat_id, clamp_message(text))
+
+
+def update_health(conn, config, token, chat_id):
+    """Art arda alert_after+ basarisiz kaynak icin bir kez uyar, duzelince bir kez haber ver."""
+    limit = int(resolve_setting(config, "alert_after"))
+    for key, ok in _HEALTH.items():
+        fail_key, alert_key = "fail:" + key, "alerted:" + key
+        name = html.escape(key)
+        if ok:
+            if meta_get(conn, alert_key):
+                if notify(config, token, chat_id, f"✅ <b>{name}</b> tekrar bağlandı."):
+                    meta_del(conn, alert_key)
+                    meta_del(conn, fail_key)
+            elif meta_get(conn, fail_key) is not None:
+                meta_del(conn, fail_key)
             continue
-        title_raw = item["title"]
-        # Yol filtresi zaten coretemp.c'ye dokunan commit'leri getirir; baslik
-        # coretemp gecmese de (x86/msr, merge tag) dosyaya dokundugu icin tutulur.
-        mark_seen(conn, sha, "git", title_raw, None)
+        count = int(meta_get(conn, fail_key, 0) or 0) + 1
+        meta_set(conn, fail_key, count)
+        if count >= limit and not meta_get(conn, alert_key):
+            if notify(config, token, chat_id,
+                      f"⚠️ <b>{name}</b> {count} koşudur ulaşılamıyor."):
+                meta_set(conn, alert_key, 1)
 
-        messages.append({
-            "source": "git",
-            "id": sha,
-            "date": item["updated"],
-            "text": clamp_message(with_explanation([
-                f"💾 <b>[git]</b> {html.escape(title_raw)}",
-                item["link"],
-                f"{item['updated'][:10]} · {html.escape(item['author'] or '?')}",
-                f"<code>{sha[:12]}</code>",
-            ], "git_commit")),
-        })
-    return True
+
+def build_update_message(config):
+    """Tek seferlik 'Sentinel guncellendi' mesaji: kaynaklar + kendi yamalarin."""
+    lines = ["🛠️ <b>Sentinel güncellendi</b>", "", "<b>İzlenen kaynaklar:</b>"]
+    lines.append("• Patchwork: " + ", ".join(
+        html.escape(q) for q in resolve_setting(config, "patchwork_queries")))
+    lines.append("• lore: " + ", ".join(resolve_setting(config, "lore_terms")))
+    lines.append("• Bugzilla: " + ", ".join(resolve_setting(config, "bugzilla_terms")))
+    trees = ", ".join(t["label"] for t in resolve_setting(config, "git_trees"))
+    files = ", ".join(os.path.basename(f) for f in resolve_setting(config, "git_files"))
+    lines.append(f"• git: {html.escape(trees)} ({html.escape(files)})")
+    if MY_PATCHES:
+        lines += ["", "<b>Senin yamaların:</b>"]
+        for patch in sorted(MY_PATCHES, key=lambda x: x.get("date") or "", reverse=True):
+            st = patch.get("state") or "?"
+            lines.append(f"• {html.escape(patch.get('name') or '?')} — "
+                         f"{html.escape(STATE_TR.get(st, st))}")
+    if STARRED:
+        lines += ["", "<b>⭐ Adının geçtiği commit'ler:</b>"]
+        seen_star = set()
+        for label, title, date in STARRED:
+            if (label, title) in seen_star:
+                continue
+            seen_star.add((label, title))
+            lines.append(f"• {html.escape(title)} — {html.escape(label)} ({date})")
+    lines += ["", "<i>Gönderilemeyen bildirim sonraki koşuda tekrar denenir; bir kaynak "
+              "6 koşu ulaşılamazsa uyarı gelir.</i>"]
+    return "\n".join(lines)
 
 
 def main():
@@ -921,8 +1190,8 @@ def main():
     sources = [
         ("Patchwork (linux-hwmon)", check_patchwork),
         ("lore.kernel.org (linux-hwmon, son 30 gün)", check_lore),
-        ("Kernel Bugzilla (summary=coretemp)", check_bugzilla),
-        ("git.kernel.org (drivers/hwmon/coretemp.c)", check_git_commits),
+        ("Kernel Bugzilla (coretemp, nct6775)", check_bugzilla),
+        ("git.kernel.org (mainline + hwmon-next)", check_git_commits),
     ]
 
     messages = []
@@ -935,8 +1204,15 @@ def main():
         except Exception as e:
             print(f"[hata] {label}: {e}", file=sys.stderr)
             status[label] = False
+            note_health(label, False)
 
     sent = dispatch(conn, config, messages, is_baseline)
+
+    # Sessiz ariza alarmi (basarisizlik sayaci DB'de)
+    update_health(conn, config, token, chat_id)
+
+    for key, ok in sorted(_HEALTH.items()):
+        print(f"[{'+' if ok else '!'}] {key}: {'ulasildi' if ok else 'ULASILAMADI'}")
 
     if not any(status.values()):
         print("[!] Tum kaynaklar basarisiz oldu.", file=sys.stderr)
@@ -952,7 +1228,7 @@ def main():
             f"🎯 <b>Coretemp Sentinel Radar Sistemi Aktif!</b>\n\n"
             f"{lines}\n"
             f"📊 <b>Başlangıç Kaydı:</b> {total_now} geçmiş kayıt hafızaya alındı.\n\n"
-            f"🛡️ <i>Şu andan itibaren coretemp ile ilgili yama, mail, hata ve commit "
+            f"🛡️ <i>Şu andan itibaren coretemp ve nct6775 ile ilgili yama, mail, hata ve commit "
             f"düştüğünde buraya bildirim alacaksınız.</i>"
         )
         if dry_run:
@@ -963,6 +1239,10 @@ def main():
     else:
         print(f"[+] Kontrol tamamlandi. {sent} bildirim gonderildi. "
               f"Toplam bilinen kayit: {count_seen(conn)}")
+        # Tek seferlik 'guncellendi' mesaji: bayrak yalnizca basarili gonderimde yazilir.
+        if meta_get(conn, "flag:update-msg-v1") is None and MY_PATCHES:
+            if notify(config, token, chat_id, build_update_message(config)):
+                meta_set(conn, "flag:update-msg-v1", "1")
 
 
 if __name__ == "__main__":
