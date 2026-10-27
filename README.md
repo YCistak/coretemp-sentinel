@@ -6,14 +6,30 @@ bildirim atan küçük bir bot. Tek bağımlılık Python 3 standart kütüphane
 
 ## Ne yapıyor?
 
-Her koşuda dört kaynağı tarar (hepsi **sadece coretemp** odaklı, genel hwmon gürültüsü yok):
+Her koşuda dört kaynağı tarar (**coretemp** ve **nct6775** odaklı, genel hwmon gürültüsü yok):
 
 | Kaynak | Sorgu | Ne bildirir |
 |---|---|---|
-| Patchwork (linux-hwmon) | `project=linux-hwmon&q=coretemp` | yeni yama **ve** aynı yamanın `state` değişimi (`accepted`/`rejected`/`superseded`/`changes-requested`/`under-review`) |
-| lore.kernel.org | `linux-hwmon/?q=coretemp&x=A` (Atom) | son 30 gündeki coretemp mail'leri (başlık/gövdede coretemp geçen) |
-| Kernel Bugzilla | `rest/bug?summary=coretemp` | özetinde coretemp geçen hatalar |
-| git.kernel.org | `.../linux.git/atom/drivers/hwmon/coretemp.c` | coretemp.c'ye dokunan commit'ler (Atom çökerse GitHub API + `GITHUB_TOKEN`) |
+| Patchwork (linux-hwmon) | `q=coretemp`, `q=nct6775`, `submitter=ycistak@gmail.com` (hepsi `order=-date&per_page=50`) | yeni yama **ve** aynı yamanın `state` değişimi; kendi yamaların da ayrı sorguyla izlenir |
+| lore.kernel.org | `linux-hwmon/?q=coretemp&x=A`, `q=nct6775` (Atom) | son 30 gündeki ilgili mail'ler (başlık/gövdede terim geçen) |
+| Kernel Bugzilla | `rest/bug?summary=coretemp`, `summary=nct6775` | özetinde terim geçen hatalar |
+| git.kernel.org | **mainline** (torvalds) ve **hwmon-next** (groeck/linux-staging, `?h=hwmon-next`) Atom'ları; `coretemp.c`, `nct6775-core.c`, `nct6775-platform.c` | commit'ler. hwmon-next için "test zamanı", mainline'a geçiş ayrı bildirim. Commit'te "Bertizlio" geçerse ⭐. Mainline Atom'u çökerse GitHub API + `GITHUB_TOKEN` |
+
+**Önemli notlar**
+
+- Patchwork API `order` verilmezse en *eski* yamaları döndürür; bu yüzden her sorguda `order=-date` vardır.
+- **Kaynak-başı taban çizgisi:** her sorgu/kaynak anahtarı (`patchwork:q=nct6775`, `git:hwmon-next:...` vb.)
+  ilk kez görüldüğünde dönen kayıtlar mesajsız "görüldü" işaretlenir (`meta` tablosu, `init:*`). Yeni
+  bir arama terimi eklemek eski kayıtları yağdırmaz.
+- **Bildirim kaybı yok:** kayıt yalnızca Telegram mesajı başarıyla gidince "görüldü" olur; gönderilemezse
+  sonraki koşuda tekrar denenir. (429'da bir kez bekleyip yeniden dener; HTML hatasında düz metin dener.)
+- **hwmon-next rebase edilebilir:** git kimliği `ağaç | yazar | başlık`tır, sha değil; rebase aynı commit'i
+  tekrar bildirmez.
+- **Sessiz arıza alarmı:** bir kaynak art arda 6 koşu ulaşılamazsa tek seferlik "⚠️ ... ulaşılamıyor",
+  düzelince tek seferlik "✅ tekrar bağlandı" gider (sayaç DB'de, `meta` tablosu `fail:*`/`alerted:*`).
+- Tek seferlik "🛠️ Sentinel güncellendi" mesajı `flag:update-msg-v1` bayrağıyla bir kez gider.
+- Yerel `~/.config/coretemp-sentinel/config.json` içindeki eski `patchwork_url`/`bugzilla_url`
+  değerleri varsayılanı ezer; yerel çalıştırmada bunları silin.
 
 Mesaj formatı kısa: `[kaynak] başlık` + link + tek satır özet + **boş satır + 2 cümlelik
 Türkçe açıklama**. Açıklama, mesajın tipine göre değişir (aşağıdaki tablo); kural tabanlı
@@ -35,7 +51,8 @@ ve deterministiktir, LLM/API kullanmaz. Bir koşuda en fazla
 | `patchwork_new` | yeni yama kaydı | henüz incelenmemiş, test edilebilir |
 | `patchwork_accepted` / `rejected` / `changes` / `superseded` | state değişimi | kabul / ret / düzeltme / yeni sürüm |
 | `patchwork_other` | diğer state'ler (`under-review`, `not-applicable`, …) | karar değil, süreci takip et |
-| `git_commit` | coretemp.c commit'i | mainline'a girdi, çakışma kontrolü |
+| `git_commit` | mainline commit'i | mainline'a girdi, çakışma kontrolü |
+| `git_next` | hwmon-next commit'i | test zamanı; rebase olabilir |
 | `bugzilla_open` / `bugzilla_resolved` | yeni/güncel hata · RESOLVED/CLOSED | yeniden üretmeyi dene · çözümü teyit et |
 | `default` | bilinmeyen tip | nötr açıklama |
 
@@ -81,11 +98,10 @@ Kaynak adresleri koda gömülü varsayılanlarla gelir, istenirse ortam değişk
 
 | Ayar | Ortam değişkeni | Varsayılan |
 |---|---|---|
-| Patchwork | `SENTINEL_PATCHWORK_URL` | `patchwork.kernel.org/api/1.2/patches/?project=linux-hwmon&q=coretemp` |
-| lore | `SENTINEL_LORE_URL` | `lore.kernel.org/linux-hwmon/?q=coretemp&x=A` |
-| Bugzilla | `SENTINEL_BUGZILLA_URL` | `bugzilla.kernel.org/rest/bug?summary=coretemp…` |
-| git Atom | `SENTINEL_GIT_ATOM_URL` | `git.kernel.org/…/atom/drivers/hwmon/coretemp.c` |
-| git API (yedek) | `SENTINEL_GIT_API_URL` | `api.github.com/repos/torvalds/linux/commits?path=…` |
+| Patchwork (taban) | `SENTINEL_PATCHWORK_URL` | `patchwork.kernel.org/api/1.2/patches/?project=linux-hwmon&order=-date&per_page=50` (+ `patchwork_queries`) |
+| lore (taban) | `SENTINEL_LORE_URL` | `lore.kernel.org/linux-hwmon/?x=A` (+ `lore_terms`) |
+| Bugzilla (taban) | `SENTINEL_BUGZILLA_URL` | `bugzilla.kernel.org/rest/bug?limit=20&order=…` (+ `bugzilla_terms`) |
+| git | yalnız `config.json` | `git_trees` (atom/api şablonları) ve `git_files` listeleri |
 
 > lore.kernel.org özel `User-Agent` istiyor: varsayılan curl/urllib UA'sı **403** alır,
 > `CoretempSentinel/1.0` ile 200 döner.
