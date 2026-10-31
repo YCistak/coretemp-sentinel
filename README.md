@@ -13,7 +13,7 @@ Her koşuda dört kaynağı tarar (**coretemp** ve **nct6775** odaklı, genel hw
 | Patchwork (linux-hwmon) | `q=coretemp`, `q=nct6775`, `submitter=ycistak@gmail.com` (hepsi `order=-date&per_page=50`) | yeni yama **ve** aynı yamanın `state` değişimi; kendi yamaların da ayrı sorguyla izlenir |
 | lore.kernel.org | `linux-hwmon/?q=coretemp&x=A`, `q=nct6775` (Atom) | son 30 gündeki ilgili mail'ler (başlık/gövdede terim geçen) |
 | Kernel Bugzilla | `rest/bug?summary=coretemp`, `summary=nct6775` | özetinde terim geçen hatalar |
-| git.kernel.org | **mainline** (torvalds) ve **hwmon-next** (groeck/linux-staging, `?h=hwmon-next`) Atom'ları; `coretemp.c`, `nct6775-core.c`, `nct6775-platform.c` | commit'ler. hwmon-next için "test zamanı", mainline'a geçiş ayrı bildirim. Commit'te "Bertizlio" geçerse ⭐. Mainline Atom'u çökerse GitHub API + `GITHUB_TOKEN` |
+| git.kernel.org | **mainline** (torvalds), **hwmon-next** (groeck/linux-staging, `?h=hwmon-next`) ve **hwmon** (acil düzeltme/fixes dalı, `?h=hwmon`) Atom'ları; `coretemp.c`, `nct6775-core.c`, `nct6775-platform.c` | commit'ler. hwmon-next için "test zamanı", hwmon için "⚡ acil düzeltme dalı, birkaç gün içinde Linus'a gider"; aynı commit iki dalda da varsa tek bildirim, mainline'a geçiş ayrı bildirim. Commit'te "Bertizlio" geçerse ⭐. Mainline Atom'u çökerse GitHub API + `GITHUB_TOKEN` |
 
 **Önemli notlar**
 
@@ -53,6 +53,7 @@ ve deterministiktir, LLM/API kullanmaz. Bir koşuda en fazla
 | `patchwork_other` | diğer state'ler (`under-review`, `not-applicable`, …) | karar değil, süreci takip et |
 | `git_commit` | mainline commit'i | mainline'a girdi, çakışma kontrolü |
 | `git_next` | hwmon-next commit'i | test zamanı; rebase olabilir |
+| `git_fixes` | hwmon (fixes) commit'i | acil düzeltme, hemen test et |
 | `bugzilla_open` / `bugzilla_resolved` | yeni/güncel hata · RESOLVED/CLOSED | yeniden üretmeyi dene · çözümü teyit et |
 | `default` | bilinmeyen tip | nötr açıklama |
 

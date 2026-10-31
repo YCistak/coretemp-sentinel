@@ -312,6 +312,8 @@ class GitTest(unittest.TestCase):
         {"tree": "mainline", "label": "mainline", "atom": "http://m/{path}", "api": None},
         {"tree": "hwmon-next", "label": "hwmon-next — test zamanı",
          "atom": "http://n/{path}", "api": None},
+        {"tree": "hwmon", "label": sentinel.DEFAULTS["git_trees"][2]["label"],
+         "atom": "http://h/{path}", "api": None},
     ]
 
     def setUp(self):
@@ -352,6 +354,47 @@ class GitTest(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertIn("[git · mainline]", msgs[0]["text"])
         self.assertIn("mainline'a geçti", msgs[0]["text"])
+
+    def test_hwmon_label_and_baseline_silent(self):
+        e = ("hwmon: (coretemp) Fix", "2026-10-31T00:00:00Z", "Biri", "aaa", "")
+        self.feeds["h"] = atom([e])
+        self.assertEqual(self.run_check(), [])  # ilk gorulme: sessiz taban cizgisi
+        self.feeds["h"] = atom([e, ("hwmon: (coretemp) Yeni", "2026-11-01T00:00:00Z", "Biri", "bbb", "")])
+        msgs = self.run_check()
+        self.assertEqual(len(msgs), 1)  # eski sessiz, yeni bildirildi
+        self.assertIn("hwmon (acil düzeltme dalı) — hemen test et, birkaç gün içinde Linus&#x27;a gider", msgs[0]["text"])
+        self.assertIn("Yeni", msgs[0]["text"])
+
+    def test_hwmon_to_mainline_transition(self):
+        self.run_check()
+        self.feeds["h"] = atom([("hwmon: F", "2026-10-31T00:00:00Z", "Biri", "aaa", "")])
+        for m in self.run_check():
+            sentinel.apply_marks(self.conn, m)
+        self.feeds["m"] = atom([("hwmon: F", "2026-11-03T00:00:00Z", "Biri", "ccc", "")])
+        msgs = self.run_check()
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("[git · mainline]", msgs[0]["text"])
+        self.assertIn("hwmon'dan mainline'a geçti", msgs[0]["text"])
+
+    def test_hwmon_and_hwmon_next_no_double_notify(self):
+        self.run_check()
+        e = ("hwmon: Z", "2026-10-31T00:00:00Z", "Biri", "aaa", "")
+        # ayni kosuda iki dalda birden
+        self.feeds["h"] = atom([e])
+        self.feeds["n"] = atom([e])
+        msgs = self.run_check()
+        self.assertEqual(len(msgs), 1)
+        for m in msgs:
+            sentinel.apply_marks(self.conn, m)
+        # sonraki kosuda yine ikisinde de: yeni bildirim yok
+        self.assertEqual(self.run_check(), [])
+        # sonradan yalniz hwmon-next'e giren, hwmon'da gorulmus commit
+        e2 = ("hwmon: W", "2026-11-01T00:00:00Z", "Biri", "bbb", "")
+        self.feeds["h"] = atom([e, e2])
+        for m in self.run_check():
+            sentinel.apply_marks(self.conn, m)
+        self.feeds["n"] = atom([e, e2])
+        self.assertEqual(self.run_check(), [])
 
     def test_no_star_without_word(self):
         self.run_check()

@@ -7,7 +7,7 @@ coretemp ve nct6775 ile ilgili kaynaklari izler:
     -> yeni yama + durum (state) degisimi
   - lore.kernel.org (linux-hwmon; coretemp, nct6775) -> mail listesi
   - Kernel Bugzilla (summary=coretemp, summary=nct6775)
-  - git.kernel.org commit'leri: mainline (torvalds) + hwmon-next (groeck)
+  - git.kernel.org commit'leri: mainline (torvalds) + hwmon-next + hwmon (groeck)
     coretemp.c, nct6775-core.c, nct6775-platform.c
 
 Tek bagimlilik Python 3 standart kutuphanesidir.
@@ -60,6 +60,11 @@ DEFAULTS = {
         {"tree": "hwmon-next", "label": "hwmon-next — test zamanı",
          "atom": ("https://git.kernel.org/pub/scm/linux/kernel/git/groeck/"
                   "linux-staging.git/atom/{path}?h=hwmon-next"),
+         "api": None},
+        {"tree": "hwmon",
+         "label": "⚡ hwmon (acil düzeltme dalı) — hemen test et, birkaç gün içinde Linus'a gider",
+         "atom": ("https://git.kernel.org/pub/scm/linux/kernel/git/groeck/"
+                  "linux-staging.git/atom/{path}?h=hwmon"),
          "api": None},
     ],
     "star_words": ["bertizlio"],
@@ -449,6 +454,8 @@ def with_explanation(lines, kind, detail=""):
     body = "\n".join(lines).rstrip()
     if kind == "git_next":
         aciklama = "🧪 <b>HWMON-NEXT:</b> Commit Guenter Roeck'un hwmon-next ağacına girdi, mainline'dan önce test edebilirsin. Bu ağaç yeniden yazılabilir (rebase); mainline'a geçince ayrıca haber vereceğim."
+    elif kind == "git_fixes":
+        aciklama = "⚡ <b>HWMON (FIXES):</b> Commit Guenter Roeck'un acil düzeltme (fixes) dalı hwmon'a girdi; genelde birkaç gün içinde Linus'a gider. Hemen test edebilirsin. Dal yeniden yazılabilir; mainline'a geçince ayrıca haber vereceğim."
     elif kind == "git_commit":
         aciklama = "💾 <b>GIT COMMIT:</b> coretemp/nct6775 sürücüsüne mainline çekirdekte yeni bir commit merge edildi. Değişikliğin senin yamanla veya sürücü mantığıyla ilişkisini inceleyebilirsin."
     else:
@@ -1005,6 +1012,9 @@ def check_bugzilla(conn, config, is_baseline, messages):
     return all_ok
 
 
+PRE_MAINLINE_TREES = ("hwmon-next", "hwmon")
+
+
 def git_commit_id(tree, author, title):
     """hwmon-next rebase edilebilir (sha degisir); kimlik agac + yazar + baslik."""
     return f"{tree}|{author}|{title}"
@@ -1049,6 +1059,7 @@ def check_git_commits(conn, config, is_baseline, messages):
     all_ok = True
     ok_keys = []
     queued = set()
+    queued_pre = set()  # hwmon / hwmon-next arasi cift bildirimi onler
 
     for tree_cfg in resolve_setting(config, "git_trees"):
         tree = tree_cfg["tree"]
@@ -1080,6 +1091,14 @@ def check_git_commits(conn, config, is_baseline, messages):
                 cid = git_commit_id(tree, author, title_raw)
                 if not sha or cid in queued or is_seen(conn, cid, "git"):
                     continue
+                # Ayni commit (yazar+baslik) kardes on-ağaçta zaten varsa tekrar bildirme.
+                if tree in PRE_MAINLINE_TREES:
+                    pair = (author, title_raw)
+                    if pair in queued_pre or any(
+                            is_seen(conn, git_commit_id(t, author, title_raw), "git")
+                            for t in PRE_MAINLINE_TREES if t != tree):
+                        continue
+                    queued_pre.add(pair)
                 # Eski surumde mainline coretemp commit'leri duz sha ile tutuluyordu.
                 if tree == "mainline" and is_seen(conn, sha, "git"):
                     continue
@@ -1094,9 +1113,13 @@ def check_git_commits(conn, config, is_baseline, messages):
                     f"{item['updated'][:10]} · {html.escape(author or '?')}",
                     f"📄 <code>{html.escape(path)}</code> · <code>{sha[:12]}</code>",
                 ]
-                if tree == "mainline" and is_seen(conn, git_commit_id("hwmon-next", author, title_raw), "git"):
-                    lines.append("🚀 hwmon-next'ten mainline'a geçti.")
-                kind = "git_next" if tree == "hwmon-next" else "git_commit"
+                if tree == "mainline":
+                    for pre in PRE_MAINLINE_TREES:
+                        if is_seen(conn, git_commit_id(pre, author, title_raw), "git"):
+                            lines.append(f"🚀 {pre}'dan mainline'a geçti." if pre == "hwmon"
+                                         else "🚀 hwmon-next'ten mainline'a geçti.")
+                            break
+                kind = {"hwmon-next": "git_next", "hwmon": "git_fixes"}.get(tree, "git_commit")
                 messages.append({
                     "source": "git",
                     "id": cid,
@@ -1191,7 +1214,7 @@ def main():
         ("Patchwork (linux-hwmon)", check_patchwork),
         ("lore.kernel.org (linux-hwmon, son 30 gün)", check_lore),
         ("Kernel Bugzilla (coretemp, nct6775)", check_bugzilla),
-        ("git.kernel.org (mainline + hwmon-next)", check_git_commits),
+        ("git.kernel.org (mainline + hwmon-next + hwmon)", check_git_commits),
     ]
 
     messages = []
