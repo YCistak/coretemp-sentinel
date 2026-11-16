@@ -447,168 +447,212 @@ def explain(kind, detail=""):
 
 _RE_REPLY_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd)\s*:\s*)+", re.I)
 
-def with_explanation(lines, kind, detail=""):
-    """Govde satirlarinin sonuna bos satir + aciklama ekler."""
-    body = "\n".join(lines).rstrip()
-    if kind == "git_next":
-        aciklama = "🧪 <b>HWMON-NEXT:</b> Commit Guenter Roeck'un hwmon-next ağacına girdi, mainline'dan önce test edebilirsin. Bu ağaç yeniden yazılabilir (rebase); mainline'a geçince ayrıca haber vereceğim."
-    elif kind == "git_fixes":
-        aciklama = "⚡ <b>HWMON (FIXES):</b> Commit Guenter Roeck'un acil düzeltme (fixes) dalı hwmon'a girdi; genelde birkaç gün içinde Linus'a gider. Hemen test edebilirsin. Dal yeniden yazılabilir; mainline'a geçince ayrıca haber vereceğim."
-    elif kind == "git_commit":
-        aciklama = "💾 <b>GIT COMMIT:</b> coretemp sürücüsüne mainline çekirdekte yeni bir commit merge edildi. Değişikliğin senin yamanla veya sürücü mantığıyla ilişkisini inceleyebilirsin."
-    else:
-        aciklama = f"ℹ️ <b>DURUM:</b> {kind}"
-    return f"{body}\n\n{aciklama}"
+# --------------------------------------------------------------------------
+# Düz Türkçe mesaj üretimi: önce karar (renk), sonra ne oldu, sonra ne yapmalı
+# --------------------------------------------------------------------------
 
-def analyze_lore_group(group):
+# Sahibin e-posta adresleri (yamaları bu adreslerden gider).
+MY_EMAILS = ["ycistak@gmail.com", "asafbertizlioglu@gmail.com"]
+# Atom beslemesinde e-posta yok, yalnızca isim var; ismi tanımak için ipuçları.
+MY_NAME_HINTS = ["bertizlio", "ycistak"]
+
+VERDICTS = {
+    "red": "🔴 Senin yaman hakkında — bakman lazım",
+    "yellow": "🟡 coretemp.c'yi değiştiren bir yama — göz at",
+    "white": "⚪ Bilgi: coretemp sadece geçerken anılıyor, bir şey yapman gerekmiyor",
+}
+
+_RE_COREMAIN_DIFF = re.compile(
+    r"(?m)^(?:diff --git |\+\+\+ |--- ).*drivers/hwmon/coretemp\.c")
+_RE_VERSION = re.compile(r"\[[^\]]*?\bv(\d+)\b[^\]]*\]", re.I)
+_RE_NO_ISSUES = re.compile(r"no (?:issues|problems)|did not find any|found no", re.I)
+_RE_TAGS = re.compile(r"(?mi)^\s*(reviewed-by|acked-by|tested-by)\s*:")
+_RE_WITHDRAW = re.compile(r"please disregard|withdraw", re.I)
+_RE_QUESTION = re.compile(
+    r"is that a theoretic or a real problem|have you observed it on a real system", re.I)
+
+
+def is_mine(*texts):
+    """Metinlerde sahibin e-postası ya da adı geçiyor mu?"""
+    blob = " ".join(t for t in texts if t).lower()
+    return any(e in blob for e in MY_EMAILS) or any(h in blob for h in MY_NAME_HINTS)
+
+
+def touches_coretemp_diff(text):
+    """Metindeki diff drivers/hwmon/coretemp.c dosyasına dokunuyor mu?"""
+    return bool(_RE_COREMAIN_DIFF.search(text or ""))
+
+
+def render_message(level, info_lines, what, todo, link, original=None, verdict=None):
+    """Tek biçim: karar, bilgi satırları, ne oldu, ne yapmalı, (İngilizce özet), link.
+
+    info_lines ve what içindeki metinler çağıran tarafından zaten kaçışlanmış (html.escape)
+    olmalıdır; burada yalnızca sabit Türkçe etiketler eklenir.
     """
-    Kuru 2 cumlelik sablonlar yerine; kimin ne dedigini, Guenter'in fircasini,
-    kabulleri ve Asaf'in maintainerlik hedefine etkisini ayrintili aciklar.
-    """
-    title = group.get("title", "")
-    authors = group.get("authors", [])
-    items = group.get("items", [])
-    
-    # Tum gruptaki metinleri birlestir ve en yeni mesaji bul
-    full_text = " ".join(item.get("summary", "") for item in items)
-    newest = max(items, key=lambda i: i.get("updated") or "") if items else {}
-    newest_author = newest.get("author", "")
-    newest_summary = newest.get("summary", "")
-    
-    # Alinti olmayan satirlari ayikla
-    reply_lines = []
-    for line in newest_summary.splitlines():
-        line_s = line.strip()
-        if not line_s or line_s.startswith(">") or line_s.startswith("&gt;"):
+    parts = [f"<b>{html.escape(verdict or VERDICTS[level])}</b>"]
+    if info_lines:
+        parts.append("\n".join(info_lines))
+    parts.append("💬 <b>Ne oldu?</b> " + " ".join(what[:3]))
+    parts.append("👉 <b>Ne yapmalısın?</b> " + todo)
+    if original:
+        parts.append("Orijinal (İngilizce):\n<i>" + html.escape(short(original, 150)) + "</i>")
+    if link:
+        parts.append("🔗 " + link)
+    return clamp_message("\n\n".join(parts))
+
+
+def _english_excerpt(summary):
+    """Son mesajın alıntı olmayan ilk satırlarından en çok 150 karakter."""
+    lines = []
+    for line in (summary or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith((">", "&gt;", "diff ", "---", "+++", "@@")):
             continue
-        if re.match(r"^On\s+.*wrote:", line_s, re.I):
+        if re.match(r"^On\s+.*wrote:", s, re.I):
             continue
-        if line_s in ("--", "---", "-- "):
+        if s in ("--", "-- "):
             break
-        reply_lines.append(line_s)
-    clean_reply = " ".join(reply_lines)
-    
-    # Onemli kisiler
-    has_guenter = any("guenter" in a.lower() or "roeck" in a.lower() for a in authors)
-    has_ximing = any("ximing" in a.lower() or "zhang" in a.lower() for a in authors)
-    has_asaf = any("asaf" in a.lower() or "ycistak" in a.lower() for a in authors)
-    
-    parts = []
-    
-    # 1. FIRCA / SERT RET / AZAR DURUMU
-    if re.search(r"please refrain|overloaded with patches|result in me getting even further behind|not getting fixed", full_text, re.I):
-        parts.append(
-            "⚠️ <b>MAINTAINER FIRÇASI / SERT RET!</b>\n"
-            "Linux hwmon lideri <b>Guenter Roeck</b> bu yamayı kesin bir dille reddetti ve Ximing Zhang'ı çok sert azarladı:\n"
-            "<i>'Zaten gerçek dünyadaki gerçek sorunları çözen yamalarla boğulmuş durumdayım. "
-            "Lütfen bir daha masa başında uydurulmuş benzer teorik yamalar gönderip durma, vaktimi alıyorsun!'</i>\n\n"
-            "📌 <b>Maintainer'lık Hedefimiz İçin Anlamı:</b> Rakibiniz Ximing teorik kod spamlamaktan dolayı maintainer nezdinde çok ciddi eksi puan aldı. "
-            "Guenter'ın sadece 'gerçek donanımda kanıtlanmış sorunları' istediğini net olarak görmüş olduk."
-        )
-    # 2. GERI VITES / DISREGARD DURUMU
-    elif re.search(r"please disregard|it is theoretical|not observed the failure|withdrawing", full_text, re.I):
-        parts.append(
-            "🔄 <b>YAMA GERİ ÇEKİLDİ (Disregard):</b>\n"
-            "Geliştirici (Ximing Zhang), hatayı gerçek bir sistemde görmediğini, yalnızca yapay hata enjeksiyonuyla üretilmiş "
-            "teorik bir kurgu olduğunu itiraf etti ve Guenter'dan yamasının çöpe atılmasını rica etti."
-        )
-    # 3. KABUL (Applied) DURUMU
-    elif re.search(r"\bapplied\.", full_text, re.I):
-        if has_asaf and "document sysfs numbering" in title.lower():
-            parts.append(
-                "🎉 <b>MÜJDE: SENİN YAMAN RESMEN KABUL EDİLDİ (Applied)!</b>\n"
-                "Linux donanım izleme lideri <b>Guenter Roeck</b> senin yamanı tek kelime itiraz etmeden kabul etti ('Applied'). "
-                "Yaman resmi <code>hwmon-next</code> dalına alındı ve ana Linux çekirdeğine girecek! İlk çekirdek başarın resmileşti."
-            )
-        elif has_asaf and has_ximing:
-            parts.append(
-                "🎉 <b>TEST ETTİĞİN YAMA KABUL EDİLDİ:</b>\n"
-                "Ximing'in bu yaması, senin verdiğin <code>Tested-by: Asaf Nuri Bertizlioğlu</code> onayı sayesinde "
-                "Guenter Roeck tarafından kabul edildi. Adın çekirdek git geçmişinde resmi testçi olarak yer aldı!"
-            )
-        else:
-            parts.append(
-                "🎉 <b>YAMA KABUL EDİLDİ (Applied):</b>\n"
-                "Maintainer Guenter Roeck bu yamayı resmi olarak kabul etti ve çekirdek kuyruğuna (hwmon-next) ekledi."
-            )
-    # 4. SORGULAMA DURUMU (Teorik mi gercek mi?)
-    elif re.search(r"is that a theoretic or a real problem|have you observed it on a real system", full_text, re.I):
-        parts.append(
-            "❓ <b>MAINTAINER SORGULAMASI:</b>\n"
-            "Guenter Roeck bu yamanın gerçek bir donanımda test edilip edilmediğini sordu. "
-            "Geliştiricinin yapay hata enjeksiyonu yaptığından şüphelenerek hesap sordu."
-        )
-    # 5. TEST / ONAY DURUMU
-    elif re.search(r"\b(reviewed-by|tested-by):", full_text, re.I):
-        parts.append(
-            "✅ <b>İNCELEME VE TEST ONAYI:</b>\n"
-            "Geliştiriciler yamayı test edip onay etiketlerini (Tested-by / Reviewed-by) ekledi. "
-            "Bu durum yamanın güvenilirliğini artırır."
-        )
-    # 6. YENI YAMA
-    elif re.match(r"^\[\s*(?:RFC\s*)?PATCH", title.strip(), re.I):
-        if has_ximing:
-            parts.append(
-                "📝 <b>RAKİP GELİŞTİRİCİ YAMASI (Ximing Zhang):</b>\n"
-                "Ximing Zhang coretemp için yeni bir yama önerisi gönderdi. "
-                "Kendi i7-14700F donanımımızda inceleyip test edebilir veya eksik bulursak yorum yazabiliriz."
-            )
-        elif has_asaf:
-            parts.append("📝 <b>SENİN GÖNDERDİĞİN YAMA:</b> Listeye sunduğun resmi çekirdek yama önerisi.")
-        else:
-            parts.append(f"📝 <b>YENİ YAMA ÖNERİSİ:</b> {newest_author} tarafından listeye yeni bir coretemp yaması sunuldu.")
+        lines.append(s)
+    return short(" ".join(lines), 150)
+
+
+def lore_relevance(group):
+    """kırmızı: sahibin yaması/adı; sarı: başlıkta coretemp ya da coretemp.c diff'i; beyaz: geçerken."""
+    items = group.get("items", [])
+    blob = [group.get("title", "")] + list(group.get("authors", []))
+    blob += [i.get("title", "") + " " + i.get("summary", "") for i in items]
+    if is_mine(*blob):
+        return "red"
+    if any("coretemp" in i.get("title", "").lower() for i in items) \
+            or any(touches_coretemp_diff(i.get("summary", "")) for i in items):
+        return "yellow"
+    return "white"
+
+
+def _lore_events(items):
+    """Thread'deki olayları (ad, ayrıntı) olarak sırayla çıkarır."""
+    events = []
+    for item in sorted(items, key=lambda i: i.get("updated") or ""):
+        body = item.get("summary", "")
+        author = item.get("author", "") or "Biri"
+        if _RE_APPLIED.search(body):
+            events.append(("applied", author))
+        if "sashiko" in author.lower() or re.search(r"\bbot\b", author.lower()):
+            events.append(("bot_ok" if _RE_NO_ISSUES.search(body) else "bot", author))
+        if _RE_TAGS.search(body):
+            events.append(("review", author))
+        if _RE_CHANGES.search(body):
+            events.append(("changes", author))
+        if _RE_WITHDRAW.search(body):
+            events.append(("withdraw", author))
+        if _RE_QUESTION.search(body):
+            events.append(("question", author))
+    seen, result = set(), []
+    for ev in events:
+        if ev[0] not in seen:
+            seen.add(ev[0])
+            result.append(ev)
+    return result
+
+
+def explain_lore_group(group, level):
+    """(cümleler, yapılacak) — sade Türkçe, en çok 3 cümle."""
+    items = group.get("items", [])
+    ordered = sorted(items, key=lambda i: i.get("updated") or "")
+    firsts = [i for i in ordered if not _RE_REPLY_PREFIX.match(i.get("title", ""))]
+    esc = html.escape
+
+    if firsts:
+        first = firsts[0]
+        plain = short(_RE_BRACKET_TAG.sub(" ", display_subject(first["title"])), 90)
+        m = _RE_VERSION.search(first["title"])
+        ver = ""
+        if m and int(m.group(1)) >= 2:
+            n = m.group(1)
+            ver = f" (yamanın {n}. düzeltilmiş hali, v{n})"
+        intro = (f"{esc(first.get('author') or 'Biri')} \"{esc(plain)}\" adlı yamayı "
+                 f"gönderdi{ver}.")
     else:
-        parts.append(f"💬 <b>TARTIŞMA / YORUM:</b> {newest_author} yama tartışmasına teknik yanıt verdi.")
-        
-    # Yazarın son cevabından somut alıntı
-    if clean_reply:
-        quote = clean_reply
-        if len(quote) > 300:
-            quote = quote[:297] + "..."
-        parts.append(f"🗣️ <b>{newest_author} ne yazdı:</b>\n<i>\"{html.escape(quote)}\"</i>")
-        
-    return "\n\n".join(parts)
+        n = group.get("count", len(items))
+        intro = f"Daha önce gönderilmiş bir yamanın altına {n} yeni cevap yazıldı."
+
+    texts = {
+        "applied": lambda a: (f"{esc(a)} yamayı kabul etti (Applied): yani yama çekirdeğe "
+                              "girecek."),
+        "bot_ok": lambda a: (f"Otomatik yapay zekâ incelemesi ({esc(a)}) yamada sorun "
+                             "bulmadı."),
+        "bot": lambda a: f"Otomatik yapay zekâ incelemesi ({esc(a)}) yamaya bir not bıraktı.",
+        "review": lambda a: ("Biri yamayı inceledi/test etti ve onay verdi "
+                             "(Reviewed-by/Tested-by)."),
+        "changes": lambda a: "Yamada düzeltme istendi; yazar yeni bir sürüm göndermeli.",
+        "withdraw": lambda a: "Yazar yamayı geri çekti (yok sayın dedi).",
+        "question": lambda a: (f"{esc(a)}, sorunun gerçek bir donanımda görülüp "
+                               "görülmediğini sordu."),
+    }
+    events = _lore_events(items)
+    kinds = {e[0] for e in events}
+    sentences = [texts[k](a) for k, a in events]
+    # Kabul + temiz bot incelemesi tek cümlede toplanır (en çok 3 cümle sınırı için).
+    ev = dict(events)
+    if "applied" in ev and "bot_ok" in ev:
+        combo = (f"{esc(ev['applied'])} yamayı kabul etti (Applied): yani yama çekirdeğe "
+                 f"girecek; otomatik yapay zekâ incelemesi ({esc(ev['bot_ok'])}) de sorun "
+                 "bulmadı.")
+        sentences = [combo] + [texts[k](a) for k, a in events if k not in ("applied", "bot_ok")]
+
+    reason = None
+    if level == "white":
+        reason = ("Bu yazışma yalnızca içinde \"coretemp\" kelimesi geçtiği için listeye "
+                  "düştü; coretemp.c'ye dokunmuyor.")
+    elif level == "red":
+        reason = "Yazışmada senin adın ya da e-postan geçiyor."
+    keep = 3 - 1 - (1 if reason else 0)
+    sentences = [intro] + sentences[:keep] + ([reason] if reason else [])
+
+    if level == "white":
+        todo = "Hiçbir şey."
+    elif level == "red":
+        if "changes" in kinds:
+            todo = "Linke tıklayıp yorumları oku, yamanı düzeltip v2 gönder."
+        elif "applied" in kinds:
+            todo = "Linke tıklayıp kabul mesajını oku; başka bir şey yapman gerekmiyor."
+        else:
+            todo = "Linke tıklayıp cevabı oku; soru varsa cevap yaz."
+    else:
+        todo = "Linke tıklayıp coretemp.c'deki değişikliğe göz at; yamanla çakışıyor mu bak."
+    return sentences, todo
 
 
-def explain_patchwork(state, is_new, patch_name=""):
-    """Patchwork durumunu maintainer hedefine gore Turkce aciklar."""
+def explain_patchwork_state(state, is_new):
+    """Patchwork durumunu sade Türkçe cümle olarak verir: (cümle, yapılacak)."""
     state = (state or "").lower()
     if is_new:
-        return (
-            "⏳ <b>PATCHWORK DURUMU: YENİ (New)</b>\n"
-            "Yama Patchwork sistemine yeni düştü, henüz maintainer tarafından karara bağlanmadı. "
-            "İnceleme ve test için sırada bekliyor."
-        )
-    if state == "accepted":
-        return (
-            "🎉 <b>PATCHWORK DURUMU: KABUL EDİLDİ (Accepted)!</b>\n"
-            "Maintainer yamayı onayladı ve çekirdeğe dahil etti. Senin yaman ise artık resmen Linux çekirdeğinin parçası demektir!"
-        )
-    if state == "rejected":
-        return (
-            "❌ <b>PATCHWORK DURUMU: REDDEDİLDİ (Rejected)</b>\n"
-            "Yama maintainer tarafından reddedildi, bu haliyle çekirdeğe girmeyecek."
-        )
-    if state == "superseded":
-        return (
-            "🔄 <b>PATCHWORK DURUMU: ESKİ SÜRÜM (Superseded)</b>\n"
-            "Bu yama daha yeni bir sürüm (v2/v3) geldiği için geçersiz kaldı, arşivlendi."
-        )
-    return f"ℹ️ <b>PATCHWORK DURUMU: {state.upper()}</b>\nYama inceleme sürecinde durum güncellendi."
+        return ("Patchwork'e (yamaların takip sayfası) yeni bir yama düştü; henüz kimse "
+                "karar vermedi.",
+                "Linke tıklayıp yamaya göz at.")
+    table = {
+        "accepted": ("Yama kabul edildi: çekirdeğe girecek.", "Hiçbir şey; sevinebilirsin."),
+        "rejected": ("Yama reddedildi: bu haliyle çekirdeğe girmeyecek.",
+                     "Linke tıklayıp sebebini oku."),
+        "changes-requested": ("Yamada değişiklik istendi.",
+                              "Yorumları oku, yamayı düzeltip yeni sürüm gönder."),
+        "superseded": ("Yamanın daha yeni bir sürümü geldi, bu eskisi geçersiz oldu.",
+                       "Hiçbir şey; yeni sürümü takip et."),
+    }
+    if state in table:
+        return table[state]
+    return ("Yamanın durumu değişti ama kabul ya da ret anlamına gelmiyor.",
+            "İstersen linke tıklayıp bak.")
 
 
-def explain_bugzilla(status, summary=""):
+def explain_bugzilla_status(status):
     status_up = (status or "").upper()
     if status_up in ("RESOLVED", "CLOSED", "VERIFIED"):
-        return (
-            "✅ <b>BUGZILLA DURUMU: ÇÖZÜLDÜ (Closed)</b>\n"
-            "Bildirilen donanım hatası kapatıldı, sorun çözülmüş sayılıyor."
-        )
-    return (
-        "🐛 <b>KERNEL BUGZILLA HATASI:</b>\n"
-        "Kullanıcılar tarafından çekirdekte gerçek bir donanım/sıcaklık sorunu bildirildi. "
-        "Bu hatayı kendi i7-14700F makinemizde inceleyip ilk yamayı sunmak maintainer yolunda en büyük kozdur!"
-    )
+        return ("coretemp ile ilgili bir hata kaydı kapatıldı: sorun çözülmüş sayılıyor.",
+                "Linke tıklayıp çözümün ne olduğuna bak.")
+    return ("Kernel Bugzilla'da (çekirdek hata takip sayfası) coretemp ile ilgili bir "
+            "hata kaydı açıldı ya da güncellendi.",
+            "Linke tıklayıp hatanın coretemp.c ile ilgili olup olmadığına bak.")
 
 
 def clamp_message(text, limit=MAX_MESSAGE_LEN):
@@ -762,6 +806,26 @@ def finish_key(conn, key):
     meta_set(conn, "init:" + key, "1")
 
 
+def patchwork_relevance(patch):
+    """kırmızı: sahibin yaması; sarı: adında coretemp ya da diff coretemp.c; beyaz: geçerken."""
+    sub = patch.get("submitter") or {}
+    if is_mine(sub.get("name"), sub.get("email"), patch.get("name")):
+        return "red"
+    if "coretemp" in (patch.get("name") or "").lower() \
+            or touches_coretemp_diff(patch.get("diff") or ""):
+        return "yellow"
+    return "white"
+
+
+def _patchwork_sentences(level, sentence):
+    cümleler = [sentence]
+    if level == "red":
+        cümleler.append("Bu senin gönderdiğin yama.")
+    elif level == "white":
+        cümleler.append("Yama coretemp.c'ye dokunmuyor, yalnızca aramaya takıldı.")
+    return cümleler
+
+
 def check_patchwork(conn, config, is_baseline, messages):
     """Yeni yama + ayni yamanin state degisimi (coretemp, kendi yamalarin).
 
@@ -794,10 +858,13 @@ def check_patchwork(conn, config, is_baseline, messages):
 
     for p_id, patch in patches.items():
         p_state = patch.get("state") or ""
-        title = html.escape(patch.get("name") or "Bilinmeyen Yama")
-        submitter = html.escape((patch.get("submitter") or {}).get("name") or "Bilinmiyor")
+        raw_name = patch.get("name") or "Bilinmeyen Yama"
+        title = html.escape(raw_name)
+        submitter_raw = (patch.get("submitter") or {}).get("name") or "Bilinmiyor"
+        submitter = html.escape(submitter_raw)
         web_url = patch.get("web_url") or f"https://patchwork.kernel.org/patch/{p_id}/"
         date_str = (patch.get("date") or "")[:10]
+        level = patchwork_relevance(patch)
 
         exists, old_state = get_seen_state(conn, p_id, "patchwork")
         if not exists:
@@ -805,12 +872,15 @@ def check_patchwork(conn, config, is_baseline, messages):
                 # Yeni sorgunun eski gecmisi: sessizce gorulmus say.
                 mark_seen(conn, p_id, "patchwork", title, p_state)
                 continue
+            sentence, todo = explain_patchwork_state(p_state, is_new=True)
             messages.append({
                 "source": "patchwork",
                 "id": p_id,
                 "date": patch.get("date") or "",
                 "marks": [(p_id, "patchwork", title, p_state)],
-                "text": f"🆕 <b>[patchwork]</b> {title}\n{web_url}\n📅 {date_str} · 👤 {submitter}\n\n" + explain_patchwork(p_state, is_new=True, patch_name=title),
+                "text": render_message(
+                    level, [f"🆕 <i>{title}</i>", f"({date_str} · {submitter})"],
+                    _patchwork_sentences(level, sentence), todo, web_url),
             })
         elif p_state and p_state != old_state:
             # state'i henuz izlenmeyen eski kayitlar (migration sonrasi NULL)
@@ -818,12 +888,17 @@ def check_patchwork(conn, config, is_baseline, messages):
             if not old_state:
                 mark_seen(conn, p_id, "patchwork", title, p_state)
                 continue
+            sentence, todo = explain_patchwork_state(p_state, is_new=False)
+            sentence += (f" (durum: {html.escape(STATE_TR.get(old_state, old_state))} → "
+                         f"{html.escape(STATE_TR.get(p_state, p_state))})")
             messages.append({
                 "source": "patchwork",
                 "id": p_id,
                 "date": patch.get("date") or "",
                 "marks": [(p_id, "patchwork", title, p_state)],
-                "text": f"🔄 <b>[patchwork]</b> {title}\n{web_url}\n📊 Durum Değişimi: {html.escape(old_state or "?")} → <b>{html.escape(p_state)}</b>\n\n" + explain_patchwork(p_state, is_new=False, patch_name=title),
+                "text": render_message(
+                    level, [f"🔄 <i>{title}</i>", f"({date_str} · {submitter})"],
+                    _patchwork_sentences(level, sentence), todo, web_url),
             })
 
     for key in ok_keys:
@@ -881,27 +956,26 @@ def lore_group_kind(group):
 
 
 def compose_lore_message(group):
-    """Bir thread'in tum yeni maillerini tek ve derinlemesine Turkce bildirim metnine cevirir."""
+    """Bir thread'in tüm yeni maillerini tek, sade Türkçe bildirim metnine çevirir."""
+    level = lore_relevance(group)
+    sentences, todo = explain_lore_group(group, level)
     authors = ", ".join(group["authors"][:3])
     if len(group["authors"]) > 3:
         authors += f" +{len(group['authors']) - 3}"
     meta = f"{authors or '?'} · {group['date'][:10]}"
     if group["count"] > 1:
         meta += f" · {group['count']} yeni mail"
-        
-    explanation = analyze_lore_group(group)
-    
-    text = (
-        f"📧 <b>[lore]</b> {html.escape(group['title'])}\n"
-        f"{group['link']}\n"
-        f"📅 {meta}\n\n"
-        f"{explanation}"
-    )
+    info = [f"📧 <i>{html.escape(short(group['title'], 160))}</i>",
+            f"({html.escape(meta)})"]
+    newest = max(group["items"], key=lambda i: i.get("updated") or "")
+    original = _english_excerpt(newest.get("summary", "")) if level != "white" else None
+    text = render_message(level, ["\n".join(info)], sentences, todo, group["link"],
+                          original=original)
     return {
         "source": "lore",
         "id": group["key"],
         "date": group["date"],
-        "text": clamp_message(text),
+        "text": text,
         "marks": [(i["id"], "lore", i["title"], None) for i in group["items"]],
     }
 
@@ -998,12 +1072,23 @@ def check_bugzilla(conn, config, is_baseline, messages):
                 continue
             creator = bug.get("creator") or "Bilinmiyor"
             web_url = f"https://bugzilla.kernel.org/show_bug.cgi?id={b_id}"
+            level = "red" if is_mine(creator, bug.get("assigned_to"), summary_raw) else "yellow"
+            sentence, todo = explain_bugzilla_status(status)
+            what = [sentence]
+            if level == "red":
+                what.append("Kayıtta senin adın ya da e-postan geçiyor.")
             messages.append({
                 "source": "bugzilla",
                 "id": b_id,
                 "date": bug.get("last_change_time") or "",
                 "marks": [(b_id, "bugzilla", summary_raw, status)],
-                "text": clamp_message(f"🐛 <b>[bugzilla]</b> #{b_id} {html.escape(short(summary_raw, 140))}\n{web_url}\n📊 {html.escape(status)} · 👤 {html.escape(creator)}\n\n" + explain_bugzilla(status, summary_raw)),
+                "text": render_message(
+                    level,
+                    [f"🐛 #{b_id} <i>{html.escape(short(summary_raw, 140))}</i>",
+                     f"({html.escape(status)} · {html.escape(creator)})"],
+                    what, todo, web_url,
+                    verdict=None if level == "red" else
+                    "🟡 coretemp ile ilgili bir hata kaydı — göz at"),
             })
     for key in ok_keys:
         finish_key(conn, key)
@@ -1011,6 +1096,18 @@ def check_bugzilla(conn, config, is_baseline, messages):
 
 
 PRE_MAINLINE_TREES = ("hwmon-next", "hwmon")
+
+
+GIT_SENTENCES = {
+    "mainline": ("coretemp.c'yi değiştiren bir commit Linus'un ana çekirdeğine (mainline) "
+                 "girdi."),
+    "hwmon-next": ("coretemp.c'yi değiştiren bir commit Guenter'ın hwmon-next ağacına girdi; "
+                   "bu, mainline'dan önceki deneme ağacıdır ve yeniden yazılabilir."),
+    "hwmon": ("coretemp.c'yi değiştiren bir commit Guenter'ın acil düzeltme dalına (hwmon) "
+              "girdi; genelde birkaç gün içinde Linus'a gider."),
+}
+GIT_TODO = "Linke tıklayıp değişikliğe göz at; yamanla çakışıyor mu bak."
+GIT_TODO_RED = "Linke tıklayıp commit'e bak; adının nasıl geçtiğini kontrol et."
 
 
 def git_commit_id(tree, author, title):
@@ -1105,25 +1202,32 @@ def check_git_commits(conn, config, is_baseline, messages):
                     mark_seen(conn, cid, "git", title_raw, None)
                     continue
 
-                lines = [
-                    f"{'⭐ ' if starred else ''}💾 <b>[git · {html.escape(tree_cfg['label'])}]</b> {html.escape(title_raw)}",
-                    item["link"],
-                    f"{item['updated'][:10]} · {html.escape(author or '?')}",
-                    f"📄 <code>{html.escape(path)}</code> · <code>{sha[:12]}</code>",
+                level = "red" if (starred or is_mine(author, item["summary"])) else "yellow"
+                info = [
+                    f"{'⭐ ' if starred else ''}💾 <b>[git · {html.escape(tree_cfg['label'])}]</b> "
+                    f"{html.escape(short(title_raw, 160))}",
+                    f"({item['updated'][:10]} · {html.escape(author or '?')} · "
+                    f"<code>{html.escape(path)}</code> · <code>{html.escape(sha[:12])}</code>)",
                 ]
+                what = [GIT_SENTENCES.get(tree, GIT_SENTENCES["mainline"])]
                 if tree == "mainline":
                     for pre in PRE_MAINLINE_TREES:
                         if is_seen(conn, git_commit_id(pre, author, title_raw), "git"):
-                            lines.append(f"🚀 {pre}'dan mainline'a geçti." if pre == "hwmon"
-                                         else "🚀 hwmon-next'ten mainline'a geçti.")
+                            what.append("🚀 hwmon'dan mainline'a geçti." if pre == "hwmon"
+                                        else "🚀 hwmon-next'ten mainline'a geçti.")
                             break
-                kind = {"hwmon-next": "git_next", "hwmon": "git_fixes"}.get(tree, "git_commit")
+                if level == "red":
+                    what.append("Commit'te senin adın ya da e-postan geçiyor.")
+                todo = GIT_TODO_RED if level == "red" else GIT_TODO
                 messages.append({
                     "source": "git",
                     "id": cid,
                     "date": item["updated"],
                     "marks": [(cid, "git", title_raw, None)],
-                    "text": clamp_message(with_explanation(lines, kind)),
+                    "text": render_message(
+                        level, ["\n".join(info)], what, todo, item["link"],
+                        verdict=None if level == "red" else
+                        "🟡 coretemp.c'yi değiştiren bir commit — göz at"),
                 })
     for key in ok_keys:
         finish_key(conn, key)
