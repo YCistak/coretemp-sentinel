@@ -265,7 +265,7 @@ class PatchworkTest(unittest.TestCase):
         self.run_check({"q=coretemp": [patch_json(1)]})
         _, msgs = self.run_check({"q=coretemp": [patch_json(1, state="accepted")]})
         self.assertEqual(len(msgs), 1)
-        self.assertIn("accepted", msgs[0]["text"])
+        self.assertIn("kabul edildi", msgs[0]["text"])
 
 
 class DispatchTest(unittest.TestCase):
@@ -439,3 +439,127 @@ class MetaTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# Düz Türkçe mesaj biçimi: karar rengi, ne oldu, ne yapmalısın
+# --------------------------------------------------------------------------
+
+def lore_item(title, author, updated, summary="", link="https://lore/x"):
+    return {"id": f"{title}-{updated}-{author}", "title": title, "author": author,
+            "updated": updated, "summary": summary, "link": link}
+
+
+NCT_TITLE = "[PATCH v3 1/2] hwmon: Add driver for the NCT6801D EC sensor window"
+
+
+def nct_group():
+    items = [
+        lore_item(NCT_TITLE, "Lenovo Muhendis", "2026-11-16T08:00:00Z",
+                  "Cover letter. Compared with coretemp 101.0 C in my tests."),
+        lore_item("Re: " + NCT_TITLE, "Guenter Roeck", "2026-11-16T09:00:00Z", "Applied."),
+        lore_item("Re: " + NCT_TITLE, "sashiko-bot@kernel.org", "2026-11-16T09:30:00Z",
+                  "I found no issues in this patch."),
+    ]
+    return sentinel.build_lore_groups(items)[0]
+
+
+class PlainMessageTest(unittest.TestCase):
+    def test_emails_constant_has_both_addresses(self):
+        self.assertIn("ycistak@gmail.com", sentinel.MY_EMAILS)
+        self.assertIn("asafbertizlioglu@gmail.com", sentinel.MY_EMAILS)
+
+    def test_white_when_coretemp_only_in_body(self):
+        group = nct_group()
+        self.assertEqual(sentinel.lore_relevance(group), "white")
+        text = sentinel.compose_lore_message(group)["text"]
+        first = text.split("\n")[0]
+        self.assertIn("⚪", first)
+        self.assertIn("bir şey yapman gerekmiyor", first)
+        self.assertIn("kabul etti (Applied)", text)
+        self.assertIn("yapay zekâ incelemesi", text)
+        self.assertIn("yamanın 3. düzeltilmiş hali", text)
+        self.assertIn("Hiçbir şey.", text)
+        self.assertNotIn("Orijinal (İngilizce)", text)
+        self.assertTrue(text.rstrip().endswith("https://lore/x"))
+
+    def test_yellow_when_title_has_coretemp(self):
+        items = [lore_item("[PATCH] hwmon: (coretemp) Fix X", "Biri", "2026-11-16T08:00:00Z",
+                           "Fixes a thing.")]
+        group = sentinel.build_lore_groups(items)[0]
+        self.assertEqual(sentinel.lore_relevance(group), "yellow")
+        self.assertIn("🟡", sentinel.compose_lore_message(group)["text"].split("\n")[0])
+
+    def test_yellow_when_diff_touches_coretemp_c(self):
+        diff = "Subject\n---\ndiff --git a/drivers/hwmon/coretemp.c b/drivers/hwmon/coretemp.c\n+x"
+        items = [lore_item("[PATCH] hwmon: tweak", "Biri", "2026-11-16T08:00:00Z", diff)]
+        group = sentinel.build_lore_groups(items)[0]
+        self.assertEqual(sentinel.lore_relevance(group), "yellow")
+
+    def test_red_for_my_email_and_name(self):
+        for who, body in [("Asaf Nuri Bertizlioğlu", "x coretemp"),
+                          ("Biri", "Cc: Asaf <ycistak@gmail.com>\ncoretemp"),
+                          ("Biri", "Tested-by: A <asafbertizlioglu@gmail.com>")]:
+            items = [lore_item("[PATCH] hwmon: foo", who, "2026-11-16T08:00:00Z", body)]
+            group = sentinel.build_lore_groups(items)[0]
+            with self.subTest(who=who):
+                self.assertEqual(sentinel.lore_relevance(group), "red")
+                text = sentinel.compose_lore_message(group)["text"]
+                self.assertIn("🔴 Senin yaman hakkında — bakman lazım", text)
+                self.assertIn("Orijinal (İngilizce)", text)
+
+    def test_changes_requested_todo(self):
+        items = [
+            lore_item("[PATCH] hwmon: (coretemp) X", "Asaf Nuri Bertizlioğlu",
+                      "2026-11-16T08:00:00Z", "body"),
+            lore_item("Re: [PATCH] hwmon: (coretemp) X", "Guenter Roeck",
+                      "2026-11-16T09:00:00Z", "Please fix the locking and send v2"),
+        ]
+        text = sentinel.compose_lore_message(sentinel.build_lore_groups(items)[0])["text"]
+        self.assertIn("yeni bir sürüm", text)
+        self.assertIn("v2 gönder", text)
+
+    def test_english_excerpt_is_short_and_labelled(self):
+        long = "word " * 200
+        items = [lore_item("[PATCH] hwmon: (coretemp) X", "Biri", "2026-11-16T08:00:00Z", long)]
+        text = sentinel.compose_lore_message(sentinel.build_lore_groups(items)[0])["text"]
+        part = text.split("Orijinal (İngilizce):\n<i>")[1].split("</i>")[0]
+        self.assertLessEqual(len(part), 150 + 20)
+
+    def test_at_most_three_sentences_in_what_happened(self):
+        group = nct_group()
+        sentences, _ = sentinel.explain_lore_group(group, "white")
+        self.assertLessEqual(len(sentences), 3)
+
+    def test_html_escaped_and_clamped(self):
+        items = [lore_item("[PATCH] hwmon: (coretemp) <b>x</b> & y", "A & <B>",
+                           "2026-11-16T08:00:00Z", "<script> " * 2000)]
+        text = sentinel.compose_lore_message(sentinel.build_lore_groups(items)[0])["text"]
+        self.assertNotIn("<script>", text)
+        self.assertNotIn("<B>", text)
+        self.assertLessEqual(len(text), sentinel.MAX_MESSAGE_LEN)
+
+    def test_patchwork_relevance(self):
+        mine = {"name": "hwmon: foo", "submitter": {"name": "Asaf", "email": "ycistak@gmail.com"}}
+        other = {"name": "hwmon: (coretemp) foo", "submitter": {"name": "X", "email": "x@y.z"}}
+        away = {"name": "hwmon: nct6775", "submitter": {"name": "X", "email": "x@y.z"}}
+        self.assertEqual(sentinel.patchwork_relevance(mine), "red")
+        self.assertEqual(sentinel.patchwork_relevance(other), "yellow")
+        self.assertEqual(sentinel.patchwork_relevance(away), "white")
+
+    def test_git_message_is_yellow_with_todo(self):
+        conn = sentinel.init_db(":memory:")
+        cfg = make_config(git_trees=GitTest.TREES, git_files=["f.c"])
+        feeds = {}
+
+        def fake(url, **kw):
+            return feeds.get(url.split("/")[2], atom([]))
+        with mock.patch.object(sentinel, "http_get", fake):
+            sentinel.check_git_commits(conn, cfg, False, [])
+            feeds["m"] = atom([("hwmon: (coretemp) Y", "2026-11-01T00:00:00Z", "Biri", "aaa", "")])
+            msgs = []
+            sentinel.check_git_commits(conn, cfg, False, msgs)
+        text = msgs[0]["text"]
+        self.assertIn("🟡", text.split("\n")[0])
+        self.assertIn("Linus'un ana çekirdeğine (mainline)", text)
+        self.assertIn("Ne yapmalısın?", text)
