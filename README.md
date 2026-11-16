@@ -6,19 +6,19 @@ bildirim atan küçük bir bot. Tek bağımlılık Python 3 standart kütüphane
 
 ## Ne yapıyor?
 
-Her koşuda dört kaynağı tarar (**coretemp** ve **nct6775** odaklı, genel hwmon gürültüsü yok):
+Her koşuda dört kaynağı tarar (**coretemp** odaklı, genel hwmon gürültüsü yok):
 
 | Kaynak | Sorgu | Ne bildirir |
 |---|---|---|
-| Patchwork (linux-hwmon) | `q=coretemp`, `q=nct6775`, `submitter=ycistak@gmail.com` (hepsi `order=-date&per_page=50`) | yeni yama **ve** aynı yamanın `state` değişimi; kendi yamaların da ayrı sorguyla izlenir |
-| lore.kernel.org | `linux-hwmon/?q=coretemp&x=A`, `q=nct6775` (Atom) | son 30 gündeki ilgili mail'ler (başlık/gövdede terim geçen) |
-| Kernel Bugzilla | `rest/bug?summary=coretemp`, `summary=nct6775` | özetinde terim geçen hatalar |
-| git.kernel.org | **mainline** (torvalds), **hwmon-next** (groeck/linux-staging, `?h=hwmon-next`) ve **hwmon** (acil düzeltme/fixes dalı, `?h=hwmon`) Atom'ları; `coretemp.c`, `nct6775-core.c`, `nct6775-platform.c` | commit'ler. hwmon-next için "test zamanı", hwmon için "⚡ acil düzeltme dalı, birkaç gün içinde Linus'a gider"; aynı commit iki dalda da varsa tek bildirim, mainline'a geçiş ayrı bildirim. Commit'te "Bertizlio" geçerse ⭐. Mainline Atom'u çökerse GitHub API + `GITHUB_TOKEN` |
+| Patchwork (linux-hwmon) | `q=coretemp`, `submitter=ycistak@gmail.com` (hepsi `order=-date&per_page=50`) | yeni yama **ve** aynı yamanın `state` değişimi; kendi yamaların da ayrı sorguyla izlenir |
+| lore.kernel.org | `linux-hwmon/?q=coretemp&x=A` (Atom) | son 30 gündeki ilgili mail'ler (başlık/gövdede terim geçen) |
+| Kernel Bugzilla | `rest/bug?summary=coretemp` | özetinde terim geçen hatalar |
+| git.kernel.org | **mainline** (torvalds), **hwmon-next** (groeck/linux-staging, `?h=hwmon-next`) ve **hwmon** (acil düzeltme/fixes dalı, `?h=hwmon`) Atom'ları; `coretemp.c` | commit'ler. hwmon-next için "test zamanı", hwmon için "⚡ acil düzeltme dalı, birkaç gün içinde Linus'a gider"; aynı commit iki dalda da varsa tek bildirim, mainline'a geçiş ayrı bildirim. Commit'te "Bertizlio" geçerse ⭐. Mainline Atom'u çökerse GitHub API + `GITHUB_TOKEN` |
 
 **Önemli notlar**
 
 - Patchwork API `order` verilmezse en *eski* yamaları döndürür; bu yüzden her sorguda `order=-date` vardır.
-- **Kaynak-başı taban çizgisi:** her sorgu/kaynak anahtarı (`patchwork:q=nct6775`, `git:hwmon-next:...` vb.)
+- **Kaynak-başı taban çizgisi:** her sorgu/kaynak anahtarı (`patchwork:q=coretemp`, `git:hwmon-next:...` vb.)
   ilk kez görüldüğünde dönen kayıtlar mesajsız "görüldü" işaretlenir (`meta` tablosu, `init:*`). Yeni
   bir arama terimi eklemek eski kayıtları yağdırmaz.
 - **Bildirim kaybı yok:** kayıt yalnızca Telegram mesajı başarıyla gidince "görüldü" olur; gönderilemezse

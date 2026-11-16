@@ -2,13 +2,13 @@
 """
 Coretemp Sentinel - Linux kernel coretemp surucu radarı.
 
-coretemp ve nct6775 ile ilgili kaynaklari izler:
-  - Patchwork (linux-hwmon; q=coretemp, q=nct6775, submitter=kendi e-postan)
+coretemp ile ilgili kaynaklari izler:
+  - Patchwork (linux-hwmon; q=coretemp, submitter=kendi e-postan)
     -> yeni yama + durum (state) degisimi
-  - lore.kernel.org (linux-hwmon; coretemp, nct6775) -> mail listesi
-  - Kernel Bugzilla (summary=coretemp, summary=nct6775)
+  - lore.kernel.org (linux-hwmon; coretemp) -> mail listesi
+  - Kernel Bugzilla (summary=coretemp)
   - git.kernel.org commit'leri: mainline (torvalds) + hwmon-next + hwmon (groeck)
-    coretemp.c, nct6775-core.c, nct6775-platform.c
+    coretemp.c
 
 Tek bagimlilik Python 3 standart kutuphanesidir.
 DRY_RUN=1 ile telegram atmadan, gecici (bellek ici) DB ile sadece parse eder.
@@ -43,14 +43,12 @@ ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 DEFAULTS = {
     "patchwork_url": ("https://patchwork.kernel.org/api/1.2/patches/"
                       "?project=linux-hwmon&order=-date&per_page=50"),
-    "patchwork_queries": ["q=coretemp", "q=nct6775", "submitter=ycistak@gmail.com"],
+    "patchwork_queries": ["q=coretemp", "submitter=ycistak@gmail.com"],
     "lore_url": "https://lore.kernel.org/linux-hwmon/?x=A",
-    "lore_terms": ["coretemp", "nct6775"],
+    "lore_terms": ["coretemp"],
     "bugzilla_url": "https://bugzilla.kernel.org/rest/bug?limit=20&order=changeddate%20desc",
-    "bugzilla_terms": ["coretemp", "nct6775"],
-    "git_files": ["drivers/hwmon/coretemp.c",
-                  "drivers/hwmon/nct6775-core.c",
-                  "drivers/hwmon/nct6775-platform.c"],
+    "bugzilla_terms": ["coretemp"],
+    "git_files": ["drivers/hwmon/coretemp.c"],
     "git_trees": [
         {"tree": "mainline", "label": "mainline",
          "atom": ("https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/"
@@ -457,7 +455,7 @@ def with_explanation(lines, kind, detail=""):
     elif kind == "git_fixes":
         aciklama = "⚡ <b>HWMON (FIXES):</b> Commit Guenter Roeck'un acil düzeltme (fixes) dalı hwmon'a girdi; genelde birkaç gün içinde Linus'a gider. Hemen test edebilirsin. Dal yeniden yazılabilir; mainline'a geçince ayrıca haber vereceğim."
     elif kind == "git_commit":
-        aciklama = "💾 <b>GIT COMMIT:</b> coretemp/nct6775 sürücüsüne mainline çekirdekte yeni bir commit merge edildi. Değişikliğin senin yamanla veya sürücü mantığıyla ilişkisini inceleyebilirsin."
+        aciklama = "💾 <b>GIT COMMIT:</b> coretemp sürücüsüne mainline çekirdekte yeni bir commit merge edildi. Değişikliğin senin yamanla veya sürücü mantığıyla ilişkisini inceleyebilirsin."
     else:
         aciklama = f"ℹ️ <b>DURUM:</b> {kind}"
     return f"{body}\n\n{aciklama}"
@@ -765,7 +763,7 @@ def finish_key(conn, key):
 
 
 def check_patchwork(conn, config, is_baseline, messages):
-    """Yeni yama + ayni yamanin state degisimi (coretemp, nct6775, kendi yamalarin).
+    """Yeni yama + ayni yamanin state degisimi (coretemp, kendi yamalarin).
 
     Sorgular order=-date ile en yeniden eskiye gelir (yoksa API en eski yamalari verir).
     """
@@ -909,7 +907,7 @@ def compose_lore_message(group):
 
 
 def check_lore(conn, config, is_baseline, messages):
-    """linux-hwmon lore aramasinda coretemp/nct6775 gecen mailler (thread bazli).
+    """linux-hwmon lore aramasinda coretemp gecen mailler (thread bazli).
 
     Feed sorgusu 200 kayit ve yillara yayilan gecmis dondurur; bu yuzden her
     zaman son lore_days gun ile sinirlanir, geriye donuk spam olmaz. Ayni thread'e
@@ -969,7 +967,7 @@ def check_lore(conn, config, is_baseline, messages):
 
 
 def check_bugzilla(conn, config, is_baseline, messages):
-    """Kernel Bugzilla: yalnizca ozetinde coretemp/nct6775 gecen kayitlar."""
+    """Kernel Bugzilla: yalnizca ozetinde coretemp gecen kayitlar."""
     base = resolve_setting(config, "bugzilla_url")
     all_ok = True
     ok_keys = []
@@ -1050,7 +1048,7 @@ def fetch_git_items(tree_cfg, path):
 
 
 def check_git_commits(conn, config, is_baseline, messages):
-    """coretemp / nct6775 dosyalarinin commit'leri: mainline + hwmon-next.
+    """coretemp dosyasinin commit'leri: mainline + hwmon-next.
 
     Her (agac, dosya) cifti kendi taban cizgisine sahiptir. Ayni commit mainline'a
     gecince ayri bir bildirim olarak gider.
@@ -1213,7 +1211,7 @@ def main():
     sources = [
         ("Patchwork (linux-hwmon)", check_patchwork),
         ("lore.kernel.org (linux-hwmon, son 30 gün)", check_lore),
-        ("Kernel Bugzilla (coretemp, nct6775)", check_bugzilla),
+        ("Kernel Bugzilla (coretemp)", check_bugzilla),
         ("git.kernel.org (mainline + hwmon-next + hwmon)", check_git_commits),
     ]
 
@@ -1251,7 +1249,7 @@ def main():
             f"🎯 <b>Coretemp Sentinel Radar Sistemi Aktif!</b>\n\n"
             f"{lines}\n"
             f"📊 <b>Başlangıç Kaydı:</b> {total_now} geçmiş kayıt hafızaya alındı.\n\n"
-            f"🛡️ <i>Şu andan itibaren coretemp ve nct6775 ile ilgili yama, mail, hata ve commit "
+            f"🛡️ <i>Şu andan itibaren coretemp ile ilgili yama, mail, hata ve commit "
             f"düştüğünde buraya bildirim alacaksınız.</i>"
         )
         if dry_run:

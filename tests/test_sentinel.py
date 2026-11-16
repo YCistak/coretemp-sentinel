@@ -222,7 +222,7 @@ def patch_json(i, name="hwmon: (coretemp) X", state="new", date="2026-10-20T00:0
 class PatchworkTest(unittest.TestCase):
     def setUp(self):
         self.conn = sentinel.init_db(":memory:")
-        self.cfg = make_config(patchwork_queries=["q=coretemp", "q=nct6775"])
+        self.cfg = make_config(patchwork_queries=["q=coretemp", "q=ikinci"])
 
     def run_check(self, by_query):
         urls = []
@@ -244,10 +244,10 @@ class PatchworkTest(unittest.TestCase):
         for u in urls:
             self.assertIn("order=-date", u)
             self.assertIn("per_page=50", u)
-        self.assertTrue(any("q=nct6775" in u for u in urls))
+        self.assertTrue(any("q=ikinci" in u for u in urls))
 
     def test_first_time_query_is_silent_then_loud(self):
-        _, msgs = self.run_check({"q=coretemp": [patch_json(1)], "q=nct6775": [patch_json(2)]})
+        _, msgs = self.run_check({"q=coretemp": [patch_json(1)], "q=ikinci": [patch_json(2)]})
         self.assertEqual(msgs, [])
         self.assertTrue(sentinel.is_seen(self.conn, "1", "patchwork"))
         _, msgs = self.run_check({"q=coretemp": [patch_json(1), patch_json(3)]})
