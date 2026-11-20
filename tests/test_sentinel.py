@@ -261,6 +261,23 @@ class PatchworkTest(unittest.TestCase):
         self.assertEqual(msgs, [])
         self.assertTrue(sentinel.is_seen(self.conn, "10", "patchwork"))
 
+    def test_second_submitter_query_is_silent_first_time_and_marks_mine(self):
+        self.cfg["patchwork_queries"] = ["q=coretemp", "submitter=ycistak@gmail.com"]
+        self.run_check({"q=coretemp": [patch_json(1)], "ycistak": [patch_json(5)]})
+        self.cfg["patchwork_queries"].append("submitter=asafbertizlioglu@gmail.com")
+        mine = patch_json(20)
+        mine["submitter"] = {"name": "Asaf", "email": "asafbertizlioglu@gmail.com"}
+        sentinel.MY_PATCHES.clear()
+        _, msgs = self.run_check({"asafbertizlioglu": [mine, patch_json(21)]})
+        self.assertEqual(msgs, [])  # yeni sorgunun gecmisi spam yapmaz
+        self.assertTrue(sentinel.is_seen(self.conn, "20", "patchwork"))
+        self.assertEqual({p["id"] for p in sentinel.MY_PATCHES}, {20, 21})
+        mine2 = patch_json(22)
+        mine2["submitter"] = {"name": "Asaf", "email": "asafbertizlioglu@gmail.com"}
+        _, msgs = self.run_check({"asafbertizlioglu": [mine, mine2]})
+        self.assertEqual([m["id"] for m in msgs], ["22"])
+        self.assertIn("🔴", msgs[0]["text"])
+
     def test_state_change_still_reported(self):
         self.run_check({"q=coretemp": [patch_json(1)]})
         _, msgs = self.run_check({"q=coretemp": [patch_json(1, state="accepted")]})
@@ -519,6 +536,28 @@ class PlainMessageTest(unittest.TestCase):
         self.assertIn("yeni bir sürüm", text)
         self.assertIn("v2 gönder", text)
 
+    def test_changes_requested_next_version_from_title(self):
+        def todo_for(first_title, reply_title):
+            items = [
+                lore_item(first_title, "Asaf Nuri Bertizlioğlu", "2026-11-16T08:00:00Z", "body"),
+                lore_item(reply_title, "Guenter Roeck", "2026-11-16T09:00:00Z",
+                          "Please fix the locking"),
+            ]
+            return sentinel.compose_lore_message(sentinel.build_lore_groups(items)[0])["text"]
+        text = todo_for("[PATCH v2] hwmon: (coretemp) X", "Re: [PATCH v2] hwmon: (coretemp) X")
+        self.assertIn("v3 gönder", text)
+        self.assertNotIn("v2 gönder", text)
+        text = todo_for("[PATCH v4 1/2] hwmon: (coretemp) X",
+                        "Re: [PATCH v4 1/2] hwmon: (coretemp) X")
+        self.assertIn("v5 gönder", text)
+        text = todo_for("[PATCH] hwmon: (coretemp) X", "Re: [PATCH] hwmon: (coretemp) X")
+        self.assertIn("v2 gönder", text)
+
+    def test_next_version_helper(self):
+        self.assertEqual(sentinel.next_version(["[PATCH] a"]), 2)
+        self.assertEqual(sentinel.next_version(["[PATCH v3] a", "Re: [PATCH v2] a"]), 4)
+        self.assertEqual(sentinel.next_version([]), 2)
+
     def test_english_excerpt_is_short_and_labelled(self):
         long = "word " * 200
         items = [lore_item("[PATCH] hwmon: (coretemp) X", "Biri", "2026-11-16T08:00:00Z", long)]
@@ -538,6 +577,16 @@ class PlainMessageTest(unittest.TestCase):
         self.assertNotIn("<script>", text)
         self.assertNotIn("<B>", text)
         self.assertLessEqual(len(text), sentinel.MAX_MESSAGE_LEN)
+
+    def test_default_queries_include_both_addresses(self):
+        queries = sentinel.DEFAULTS["patchwork_queries"]
+        for email in sentinel.MY_EMAILS:
+            self.assertIn("submitter=" + email, queries)
+
+    def test_patchwork_relevance_second_address(self):
+        mine = {"name": "hwmon: foo",
+                "submitter": {"name": "X", "email": "asafbertizlioglu@gmail.com"}}
+        self.assertEqual(sentinel.patchwork_relevance(mine), "red")
 
     def test_patchwork_relevance(self):
         mine = {"name": "hwmon: foo", "submitter": {"name": "Asaf", "email": "ycistak@gmail.com"}}

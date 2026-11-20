@@ -43,7 +43,8 @@ ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 DEFAULTS = {
     "patchwork_url": ("https://patchwork.kernel.org/api/1.2/patches/"
                       "?project=linux-hwmon&order=-date&per_page=50"),
-    "patchwork_queries": ["q=coretemp", "submitter=ycistak@gmail.com"],
+    "patchwork_queries": ["q=coretemp", "submitter=ycistak@gmail.com",
+                          "submitter=asafbertizlioglu@gmail.com"],
     "lore_url": "https://lore.kernel.org/linux-hwmon/?x=A",
     "lore_terms": ["coretemp"],
     "bugzilla_url": "https://bugzilla.kernel.org/rest/bug?limit=20&order=changeddate%20desc",
@@ -555,6 +556,15 @@ def _lore_events(items):
     return result
 
 
+def next_version(titles):
+    """Başlıklardaki en yüksek [PATCH vN ...] sürümünden sonrakini verir (yoksa 2)."""
+    best = 1
+    for title in titles:
+        for m in _RE_VERSION.finditer(title or ""):
+            best = max(best, int(m.group(1)))
+    return best + 1
+
+
 def explain_lore_group(group, level):
     """(cümleler, yapılacak) — sade Türkçe, en çok 3 cümle."""
     items = group.get("items", [])
@@ -613,7 +623,8 @@ def explain_lore_group(group, level):
         todo = "Hiçbir şey."
     elif level == "red":
         if "changes" in kinds:
-            todo = "Linke tıklayıp yorumları oku, yamanı düzeltip v2 gönder."
+            nxt = next_version(i.get("title", "") for i in items)
+            todo = f"Linke tıklayıp yorumları oku, yamanı düzeltip v{nxt} gönder."
         elif "applied" in kinds:
             todo = "Linke tıklayıp kabul mesajını oku; başka bir şey yapman gerekmiyor."
         else:
