@@ -47,6 +47,19 @@ jobs:
             exit 0
           fi
           git commit -m "chore: update seen state [skip ci]"
-          # Arada baska bir kosu push ettiyse rebase ile uzerine yaz
-          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
-          git push
+          # Arada baska biri push ettiyse rebase ile uzerine yaz. sentinel.db ikili
+          # dosya oldugundan cakismada bizim (guncel) kopya kazanir (-X theirs:
+          # rebase sirasinda "theirs" = bizim commit). Eskiden "|| true" hatayi
+          # yutuyor, yarim kalan rebase push'u sessizce dusuruyordu; bildirimler
+          # gittigi icin state kaybi ayni kayitlarin tekrar gonderilmesine yol acar.
+          for deneme in 1 2 3; do
+            if git pull --rebase -X theirs --autostash origin "${GITHUB_REF_NAME}" \
+               && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            echo "Push basarisiz (deneme ${deneme}/3), yeniden deneniyor."
+            git rebase --abort 2>/dev/null || true
+            sleep $((deneme * 5))
+          done
+          echo "State push edilemedi." >&2
+          exit 1
