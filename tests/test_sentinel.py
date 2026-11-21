@@ -630,3 +630,82 @@ class ReviewTodoTest(unittest.TestCase):
         items = [lore_item("[PATCH v1] hwmon: (coretemp) X", "Biri", "2026-11-16T08:00:00Z", "b")]
         text = sentinel.compose_lore_message(sentinel.build_lore_groups(items)[0])["text"]
         self.assertIn("(v1)", text)
+
+
+def atom_entry(title, author, updated, link, uid, summary="x"):
+    return (f"<entry><author><name>{author}</name></author><title>{title}</title>"
+            f"<link href=\"{link}\"/><id>{uid}</id><updated>{updated}</updated>"
+            f"<content type=\"text\">{summary}</content></entry>")
+
+
+def atom_feed(*entries):
+    return ('<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">'
+            + "".join(entries) + "</feed>")
+
+
+class StableLoreTest(unittest.TestCase):
+    def setUp(self):
+        self.conn = sentinel.init_db(":memory:")
+        self.cfg = {}
+        now = sentinel.datetime.now(sentinel.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.now = now
+        self.bk = atom_entry("[PATCH 6.6 012/123] hwmon: (coretemp) Fix X", "Greg KH", now,
+                             "https://lore.kernel.org/stable/m1@x/", "urn:uuid:s1")
+        self.bk2 = atom_entry("[PATCH 6.1.y] hwmon: (coretemp) Fix X", "Ximing Zhang", now,
+                              "https://lore.kernel.org/stable/m2@x/", "urn:uuid:s2")
+        self.cover = atom_entry("[PATCH 6.6 000/123] 6.6.99-rc1 review coretemp", "Greg KH",
+                                now, "https://lore.kernel.org/stable/m3@x/", "urn:uuid:s3")
+        self.failed = atom_entry(
+            'FAILED: patch "[PATCH] hwmon: (coretemp) Fix X" failed to apply to 5.10-stable tree',
+            "Sasha Levin", now, "https://lore.kernel.org/stable/m4@x/", "urn:uuid:s4")
+        self.queued = atom_entry("Patch \"hwmon: (coretemp) Fix X\" has been added to the 6.6 tree",
+                                 "Sasha Levin", now, "https://lore.kernel.org/stable/m5@x/",
+                                 "urn:uuid:s5")
+
+    def run_check(self, hwmon, stable):
+        def fake(url, **kw):
+            return stable if "/stable/" in url else hwmon
+        msgs = []
+        with mock.patch.object(sentinel, "http_get", fake):
+            sentinel.check_lore(self.conn, self.cfg, False, msgs)
+        return msgs
+
+    def test_first_run_stable_is_silent_then_loud(self):
+        feed = atom_feed(self.bk, self.cover, self.failed)
+        self.assertEqual(self.run_check(atom_feed(), feed), [])
+        self.assertTrue(sentinel.is_seen(self.conn, "urn:uuid:s1", "lore"))
+        feed2 = atom_feed(self.bk, self.bk2, self.cover, self.failed, self.queued)
+        msgs = self.run_check(atom_feed(), feed2)
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("6.1.y", msgs[0]["text"])
+
+    def test_backport_message_text_and_noise_filtered(self):
+        self.run_check(atom_feed(), atom_feed())
+        msgs = self.run_check(atom_feed(), atom_feed(self.bk, self.bk2, self.cover,
+                                                     self.failed, self.queued))
+        self.assertEqual(len(msgs), 2)  # backport grubu + FAILED; kapak ve queue yok
+        texts = "\n".join(m["text"] for m in msgs)
+        self.assertIn("🟡 Eski sürüme taşınan coretemp yaması (6.1.y, 6.6)", texts)
+        self.assertIn("Reviewed-by", texts)
+        self.assertIn("Eski sürüme uygulanamayan coretemp yaması (5.10)", texts)
+        self.assertIn("elle taşıma fırsatı", texts)
+        self.assertNotIn("review coretemp", texts)
+
+    def test_same_message_id_in_both_lists_notifies_once(self):
+        self.run_check(atom_feed(), atom_feed())
+        hw = atom_entry("[PATCH 6.6 012/123] hwmon: (coretemp) Fix X", "Greg KH", self.now,
+                        "https://lore.kernel.org/linux-hwmon/m1@x/", "urn:uuid:h1",
+                        "coretemp")
+        # hwmon listesinde de gorulen mesaj stable'da farkli uuid ile gelir
+        self.run_check(atom_feed(), atom_feed())
+        msgs = self.run_check(atom_feed(hw), atom_feed(self.bk))
+        self.assertEqual(sum(1 for m in msgs if "stable" in m["id"] or "coretemp" in m["id"]), 1)
+        self.assertEqual(len(msgs), 1)
+
+    def test_cover_and_noise_helpers(self):
+        self.assertTrue(sentinel.is_stable_noise("[PATCH 6.6 000/123] 6.6.1-rc1 review"))
+        self.assertFalse(sentinel.is_stable_noise("[PATCH 6.6 012/123] hwmon: (coretemp) X"))
+        self.assertEqual(sentinel.message_id_from_link("https://lore.kernel.org/stable/a%40b/"),
+                         "a@b")
+        self.assertEqual(sentinel.stable_kind('FAILED: patch "[PATCH] x" failed to apply'),
+                         "stable_failed")

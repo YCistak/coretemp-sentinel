@@ -5,7 +5,7 @@ Coretemp Sentinel - Linux kernel coretemp surucu radarı.
 coretemp ile ilgili kaynaklari izler:
   - Patchwork (linux-hwmon; q=coretemp, submitter=kendi e-postan)
     -> yeni yama + durum (state) degisimi
-  - lore.kernel.org (linux-hwmon; coretemp) -> mail listesi
+  - lore.kernel.org (linux-hwmon + stable; coretemp) -> mail listesi
   - Kernel Bugzilla (summary=coretemp)
   - git.kernel.org commit'leri: mainline (torvalds) + hwmon-next + hwmon (groeck)
     coretemp.c
@@ -47,6 +47,10 @@ DEFAULTS = {
                           "submitter=asafbertizlioglu@gmail.com"],
     "lore_url": "https://lore.kernel.org/linux-hwmon/?x=A",
     "lore_terms": ["coretemp"],
+    # stable@vger: eski surume tasinan yamalar (backport) buraya gider, linux-hwmon'a
+    # cogu zaman CC edilmez. Cok gurultulu oldugu icin sorgu konu alanina (s:) daraltilir.
+    "lore_stable_url": "https://lore.kernel.org/stable/?x=A",
+    "lore_stable_terms": ["coretemp"],
     "bugzilla_url": "https://bugzilla.kernel.org/rest/bug?limit=20&order=changeddate%20desc",
     "bugzilla_terms": ["coretemp"],
     "git_files": ["drivers/hwmon/coretemp.c"],
@@ -76,6 +80,7 @@ DEFAULTS = {
 ENV_KEYS = {
     "patchwork_url": "SENTINEL_PATCHWORK_URL",
     "lore_url": "SENTINEL_LORE_URL",
+    "lore_stable_url": "SENTINEL_LORE_STABLE_URL",
     "bugzilla_url": "SENTINEL_BUGZILLA_URL",
 }
 
@@ -938,6 +943,100 @@ def check_patchwork(conn, config, is_baseline, messages):
     return all_ok
 
 
+_RE_STABLE_COVER = re.compile(
+    r"\[PATCH[^\]]*\s0+/\d+\]|-rc\d+\s+review|has been added to the|added to the .* tree"
+    r"|added to stable queue", re.I)
+_RE_STABLE_FAILED = re.compile(r"^\s*(?:re:\s*)*FAILED:\s*patch\s+\"(.*?)\"\s*failed to apply", re.I)
+_RE_STABLE_VER = re.compile(r"\[PATCH\s+(\d+\.\d+(?:\.\d+)?(?:\.y)?)\b", re.I)
+_RE_FAILED_VER = re.compile(r"failed to apply to\s+(\d+\.\d+(?:\.\d+)?(?:\.y)?)", re.I)
+
+
+def message_id_from_link(link):
+    """lore baglantisindan Message-ID'yi alir (listeler arasi ayni mesaji tanimak icin)."""
+    m = re.search(r"lore\.kernel\.org/[^/]+/([^/?#]+)/?", link or "")
+    return urllib.parse.unquote(m.group(1)) if m else None
+
+
+def is_stable_noise(title):
+    """Greg'in kapak mektubu / 'added to queue' bildirimi: coretemp icin eyleme donusmez."""
+    return bool(_RE_STABLE_COVER.search(title or ""))
+
+
+def stable_kind(title):
+    """'stable_failed' (uygulanamadi), 'stable_backport' ya da None."""
+    if _RE_STABLE_FAILED.match(title or ""):
+        return "stable_failed"
+    if _RE_STABLE_VER.search(title or "") or re.search(r"\[PATCH[^\]]*\]", title or "", re.I):
+        return "stable_backport"
+    return None
+
+
+def stable_versions(items):
+    """Gruptaki basliklardan eski cekirdek surumleri (6.6, 6.1.y ...), sirali ve tekil."""
+    found = []
+    for item in items:
+        t = item.get("title", "")
+        for rx in (_RE_STABLE_VER, _RE_FAILED_VER):
+            m = rx.search(t)
+            if m and m.group(1) not in found:
+                found.append(m.group(1))
+    def keyf(v):
+        return [int(x) if x.isdigit() else 0 for x in re.split(r"[.]", v)]
+    return sorted(found, key=keyf)
+
+
+def lore_group_key(item):
+    """Thread anahtari; stable ogeler mainline thread'iyle karismasin diye on ek alir."""
+    if not item.get("stable"):
+        return normalize_subject(item["title"])
+    m = _RE_STABLE_FAILED.match(item["title"] or "")
+    if m:
+        return "stable-failed: " + normalize_subject(m.group(1))
+    return "stable: " + normalize_subject(item["title"])
+
+
+def compose_stable_message(group):
+    """Stable backport / FAILED bildirimi (sarı)."""
+    failed = group.get("stable_kind") == "stable_failed"
+    first = sorted(group["items"], key=lambda i: i.get("updated") or "")[0]
+    m = _RE_STABLE_FAILED.match(first["title"] or "")
+    subject = m.group(1) if m else first["title"]
+    plain = short(_RE_BRACKET_TAG.sub(" ", display_subject(subject)), 100)
+    vers = stable_versions(group["items"])
+    vtxt = ", ".join(vers) if vers else "?"
+    authors = ", ".join(group["authors"][:3])
+    meta = f"{authors or '?'} · {group['date'][:10]}"
+    if group["count"] > 1:
+        meta += f" · {group['count']} mail"
+    if failed:
+        verdict = f"🟡 Eski sürüme uygulanamayan coretemp yaması ({vtxt})"
+        what = [f"Stable ekibi \"{html.escape(plain)}\" yamasını şu sürümlere uygulayamadı: "
+                f"{html.escape(vtxt)}."]
+        todo = ("Yama bu sürüme uygulanamadı — elle taşıma fırsatı. Eski daldaki "
+                "coretemp.c ile karşılaştır (valid alanı, 0x7f/0xff maske farkları); "
+                "inceleme-adaylari/BENIOKU.md kontrol listesini kullan.")
+    else:
+        verdict = f"🟡 Eski sürüme taşınan coretemp yaması ({vtxt})"
+        what = [f"{html.escape(group['authors'][0] if group['authors'] else 'Biri')} "
+                f"\"{html.escape(plain)}\" yamasını eski çekirdek sürümlerine ({html.escape(vtxt)}) "
+                "taşıdı (stable backport)."]
+        todo = ("İncele: eski daldaki coretemp.c ile karşılaştır (valid alanı, 0x7f/0xff "
+                "maske farkları); inceleme-adaylari/BENIOKU.md kontrol listesini kullan. "
+                "Doğruysa Reviewed-by, sorun varsa soru.")
+    info = [f"📧 <i>{html.escape(short(group['title'], 160))}</i>", f"({html.escape(meta)})"]
+    text = render_message("yellow", ["\n".join(info)], what, todo, group["link"],
+                          verdict=verdict)
+    return {
+        "source": "lore",
+        "id": group["key"],
+        "date": group["date"],
+        "text": text,
+        "marks": [(i["id"], "lore", i["title"], None) for i in group["items"]]
+                 + [("mid:" + i["mid"], "lore", i["title"], None)
+                    for i in group["items"] if i.get("mid")],
+    }
+
+
 def build_lore_groups(items):
     """Yeni lore maillerini thread'e gore gruplar, en yeni once siralar.
 
@@ -947,7 +1046,7 @@ def build_lore_groups(items):
     """
     groups = {}
     for item in items:
-        key = normalize_subject(item["title"])
+        key = lore_group_key(item)
         group = groups.get(key)
         if group is None:
             group = groups[key] = {"authors": [], "count": 0, "kinds": set(), "items": []}
@@ -956,13 +1055,15 @@ def build_lore_groups(items):
             group["authors"].append(item["author"])
         group["kinds"].add(classify_lore(item["title"], item["summary"]))
         group["items"].append(item)
+        if item.get("stable"):
+            group["stable_kind"] = stable_kind(item["title"])
 
     result = []
     for group in groups.values():
         # Grubun temsilcisi en yeni maildir.
         newest = max(group["items"], key=lambda i: i["updated"] or "")
         result.append({
-            "key": normalize_subject(newest["title"]),
+            "key": lore_group_key(newest),
             "title": display_subject(newest["title"]),
             "link": newest["link"],
             "authors": group["authors"],
@@ -972,6 +1073,7 @@ def build_lore_groups(items):
             "kinds": group["kinds"],
             "newest_kind": classify_lore(newest["title"], newest["summary"]),
             "items": group["items"],
+            "stable_kind": group.get("stable_kind"),
         })
     result.sort(key=lambda g: g["date"] or "", reverse=True)
     return result
@@ -989,6 +1091,8 @@ def lore_group_kind(group):
 
 def compose_lore_message(group):
     """Bir thread'in tüm yeni maillerini tek, sade Türkçe bildirim metnine çevirir."""
+    if group.get("stable_kind"):
+        return compose_stable_message(group)
     level = lore_relevance(group)
     sentences, todo = explain_lore_group(group, level)
     authors = ", ".join(group["authors"][:3])
@@ -1013,14 +1117,13 @@ def compose_lore_message(group):
 
 
 def check_lore(conn, config, is_baseline, messages):
-    """linux-hwmon lore aramasinda coretemp gecen mailler (thread bazli).
+    """linux-hwmon + stable lore aramasinda coretemp gecen mailler (thread bazli).
 
     Feed sorgusu 200 kayit ve yillara yayilan gecmis dondurur; bu yuzden her
     zaman son lore_days gun ile sinirlanir, geriye donuk spam olmaz. Ayni thread'e
     ait yeni mailler tek bildirimde toplanir. Yeni eklenen bir arama terimi
     ilk kosuda sessizce taban cizgisi olur.
     """
-    base = resolve_setting(config, "lore_url")
     days = int(resolve_setting(config, "lore_days"))
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     all_ok = True
@@ -1028,42 +1131,66 @@ def check_lore(conn, config, is_baseline, messages):
     new_items = []
     queued = set()
 
-    for term in resolve_setting(config, "lore_terms"):
-        key = "lore:" + term
-        body = http_get(base + ("&" if "?" in base else "?") + "q=" + urllib.parse.quote(term), timeout=30)
-        items = parse_atom(body) if body is not None else None
-        if items is None:
-            note_health(key, False)
-            all_ok = False
+    # (anahtar oneki, taban adres, terim listesi, sorgu oneki, stable mi)
+    sources = [
+        ("lore:", resolve_setting(config, "lore_url"),
+         resolve_setting(config, "lore_terms"), "", False),
+        ("lore:stable:", resolve_setting(config, "lore_stable_url"),
+         resolve_setting(config, "lore_stable_terms"), "s:", True),
+    ]
+    for prefix, base, terms, qprefix, stable in sources:
+        if not base:
             continue
-        note_health(key, True)
-        ok_keys.append(key)
-        silent = first_time(conn, key)
+        for term in terms:
+            key = prefix + term
+            body = http_get(base + ("&" if "?" in base else "?") + "q="
+                            + urllib.parse.quote(qprefix + term), timeout=30)
+            items = parse_atom(body) if body is not None else None
+            if items is None:
+                note_health(key, False)
+                all_ok = False
+                continue
+            note_health(key, True)
+            ok_keys.append(key)
+            silent = first_time(conn, key)
 
-        for item in items:
-            title_raw = item["title"]
-            summary_raw = item["summary"]
-            # Besleme sorgusu zaten daraltiyor; yine de yerelde dogrula.
-            if term not in (title_raw + " " + summary_raw).lower():
-                continue
-            date = parse_iso(item["updated"])
-            if date is None or date < cutoff:
-                continue
-            m_id = item["id"] or item["link"]
-            if m_id in queued or is_seen(conn, m_id, "lore"):
-                continue
-            queued.add(m_id)
-            if silent:
-                mark_seen(conn, m_id, "lore", title_raw, None)
-                continue
-            new_items.append({
-                "id": m_id,
-                "title": title_raw,
-                "link": item["link"],
-                "updated": item["updated"],
-                "author": item["author"],
-                "summary": summary_raw,
-            })
+            for item in items:
+                title_raw = item["title"]
+                summary_raw = item["summary"]
+                # Besleme sorgusu zaten daraltiyor; yine de yerelde dogrula.
+                if term not in (title_raw + " " + summary_raw).lower():
+                    continue
+                if stable and (term not in title_raw.lower()
+                               or is_stable_noise(title_raw)
+                               or stable_kind(title_raw) is None):
+                    continue
+                date = parse_iso(item["updated"])
+                if date is None or date < cutoff:
+                    continue
+                m_id = item["id"] or item["link"]
+                mid = message_id_from_link(item["link"])
+                mid_key = ("mid:" + mid) if mid else None
+                if (m_id in queued or is_seen(conn, m_id, "lore")
+                        or (mid_key and (mid_key in queued or is_seen(conn, mid_key, "lore")))):
+                    continue
+                queued.add(m_id)
+                if mid_key:
+                    queued.add(mid_key)
+                if silent:
+                    mark_seen(conn, m_id, "lore", title_raw, None)
+                    if mid_key:
+                        mark_seen(conn, mid_key, "lore", title_raw, None)
+                    continue
+                new_items.append({
+                    "id": m_id,
+                    "mid": mid,
+                    "title": title_raw,
+                    "link": item["link"],
+                    "updated": item["updated"],
+                    "author": item["author"],
+                    "summary": summary_raw,
+                    "stable": stable,
+                })
 
     for group in build_lore_groups(new_items):
         messages.append(compose_lore_message(group))
@@ -1303,7 +1430,8 @@ def build_update_message(config):
     lines = ["🛠️ <b>Sentinel güncellendi</b>", "", "<b>İzlenen kaynaklar:</b>"]
     lines.append("• Patchwork: " + ", ".join(
         html.escape(q) for q in resolve_setting(config, "patchwork_queries")))
-    lines.append("• lore: " + ", ".join(resolve_setting(config, "lore_terms")))
+    lines.append("• lore: " + ", ".join(resolve_setting(config, "lore_terms"))
+                 + " (+ stable: " + ", ".join(resolve_setting(config, "lore_stable_terms")) + ")")
     lines.append("• Bugzilla: " + ", ".join(resolve_setting(config, "bugzilla_terms")))
     trees = ", ".join(t["label"] for t in resolve_setting(config, "git_trees"))
     files = ", ".join(os.path.basename(f) for f in resolve_setting(config, "git_files"))
@@ -1348,7 +1476,7 @@ def main():
 
     sources = [
         ("Patchwork (linux-hwmon)", check_patchwork),
-        ("lore.kernel.org (linux-hwmon, son 30 gün)", check_lore),
+        ("lore.kernel.org (linux-hwmon + stable, son 30 gün)", check_lore),
         ("Kernel Bugzilla (coretemp)", check_bugzilla),
         ("git.kernel.org (mainline + hwmon-next + hwmon)", check_git_commits),
     ]
