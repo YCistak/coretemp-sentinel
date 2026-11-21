@@ -459,8 +459,8 @@ MY_NAME_HINTS = ["bertizlio", "ycistak"]
 
 VERDICTS = {
     "red": "🔴 Senin yaman hakkında — bakman lazım",
-    "yellow": "🟡 coretemp.c'yi değiştiren bir yama — göz at",
-    "white": "⚪ Bilgi: coretemp sadece geçerken anılıyor, bir şey yapman gerekmiyor",
+    "yellow": "🟡 coretemp.c'yi değiştiren bir yama — incele ve test et",
+    "white": "⚪ Bilgi: coretemp sadece geçerken anılıyor",
 }
 
 _RE_COREMAIN_DIFF = re.compile(
@@ -471,6 +471,14 @@ _RE_TAGS = re.compile(r"(?mi)^\s*(reviewed-by|acked-by|tested-by)\s*:")
 _RE_WITHDRAW = re.compile(r"please disregard|withdraw", re.I)
 _RE_QUESTION = re.compile(
     r"is that a theoretic or a real problem|have you observed it on a real system", re.I)
+
+
+TODO_REVIEW = ("İncele ve test et: Claude'a yamayı Türkçe açıklat, canli-test.sh ile dene; "
+               "anladıysan Reviewed-by + Tested-by cevabı hazırlat. Maintainer başvurusu "
+               "için en değerli iş bu.")
+TODO_GLANCE = "Göz at: coretemp'i etkiliyorsa yorum yapılabilir; etkilemiyorsa geç."
+TODO_BUG = ("Senin işlemcinde (i7-14700F) yeniden üretilebilir mi bak; üretilirse yama "
+            "fırsatı.")
 
 
 def is_mine(*texts):
@@ -580,6 +588,8 @@ def explain_lore_group(group, level):
         if m and int(m.group(1)) >= 2:
             n = m.group(1)
             ver = f" (yamanın {n}. düzeltilmiş hali, v{n})"
+        elif m:
+            ver = f" (v{m.group(1)})"
         intro = (f"{esc(first.get('author') or 'Biri')} \"{esc(plain)}\" adlı yamayı "
                  f"gönderdi{ver}.")
     else:
@@ -620,7 +630,7 @@ def explain_lore_group(group, level):
     sentences = [intro] + sentences[:keep] + ([reason] if reason else [])
 
     if level == "white":
-        todo = "Hiçbir şey."
+        todo = TODO_GLANCE
     elif level == "red":
         if "changes" in kinds:
             nxt = next_version(i.get("title", "") for i in items)
@@ -630,7 +640,7 @@ def explain_lore_group(group, level):
         else:
             todo = "Linke tıklayıp cevabı oku; soru varsa cevap yaz."
     else:
-        todo = "Linke tıklayıp coretemp.c'deki değişikliğe göz at; yamanla çakışıyor mu bak."
+        todo = TODO_REVIEW
     return sentences, todo
 
 
@@ -828,6 +838,15 @@ def patchwork_relevance(patch):
     return "white"
 
 
+def _patchwork_todo(level, todo):
+    """Başkasının yamasında (sarı/beyaz) inceleme-test yönlendirmesi; kırmızıda eski metin."""
+    if level == "yellow":
+        return TODO_REVIEW
+    if level == "white":
+        return TODO_GLANCE
+    return todo
+
+
 def _patchwork_sentences(level, sentence):
     cümleler = [sentence]
     if level == "red":
@@ -891,7 +910,8 @@ def check_patchwork(conn, config, is_baseline, messages):
                 "marks": [(p_id, "patchwork", title, p_state)],
                 "text": render_message(
                     level, [f"🆕 <i>{title}</i>", f"({date_str} · {submitter})"],
-                    _patchwork_sentences(level, sentence), todo, web_url),
+                    _patchwork_sentences(level, sentence),
+                    _patchwork_todo(level, todo), web_url),
             })
         elif p_state and p_state != old_state:
             # state'i henuz izlenmeyen eski kayitlar (migration sonrasi NULL)
@@ -909,7 +929,8 @@ def check_patchwork(conn, config, is_baseline, messages):
                 "marks": [(p_id, "patchwork", title, p_state)],
                 "text": render_message(
                     level, [f"🔄 <i>{title}</i>", f"({date_str} · {submitter})"],
-                    _patchwork_sentences(level, sentence), todo, web_url),
+                    _patchwork_sentences(level, sentence),
+                    _patchwork_todo(level, todo), web_url),
             })
 
     for key in ok_keys:
@@ -1085,6 +1106,8 @@ def check_bugzilla(conn, config, is_baseline, messages):
             web_url = f"https://bugzilla.kernel.org/show_bug.cgi?id={b_id}"
             level = "red" if is_mine(creator, bug.get("assigned_to"), summary_raw) else "yellow"
             sentence, todo = explain_bugzilla_status(status)
+            if level == "yellow" and status.upper() not in ("RESOLVED", "CLOSED", "VERIFIED"):
+                todo = TODO_BUG
             what = [sentence]
             if level == "red":
                 what.append("Kayıtta senin adın ya da e-postan geçiyor.")
@@ -1117,7 +1140,7 @@ GIT_SENTENCES = {
     "hwmon": ("coretemp.c'yi değiştiren bir commit Guenter'ın acil düzeltme dalına (hwmon) "
               "girdi; genelde birkaç gün içinde Linus'a gider."),
 }
-GIT_TODO = "Linke tıklayıp değişikliğe göz at; yamanla çakışıyor mu bak."
+GIT_TODO = "Bilgi: birleştirildi."
 GIT_TODO_RED = "Linke tıklayıp commit'e bak; adının nasıl geçtiğini kontrol et."
 
 
@@ -1238,7 +1261,7 @@ def check_git_commits(conn, config, is_baseline, messages):
                     "text": render_message(
                         level, ["\n".join(info)], what, todo, item["link"],
                         verdict=None if level == "red" else
-                        "🟡 coretemp.c'yi değiştiren bir commit — göz at"),
+                        "🟡 coretemp.c'yi değiştiren bir commit — bilgi"),
                 })
     for key in ok_keys:
         finish_key(conn, key)

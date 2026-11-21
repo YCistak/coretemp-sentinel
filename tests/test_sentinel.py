@@ -492,11 +492,11 @@ class PlainMessageTest(unittest.TestCase):
         text = sentinel.compose_lore_message(group)["text"]
         first = text.split("\n")[0]
         self.assertIn("⚪", first)
-        self.assertIn("bir şey yapman gerekmiyor", first)
+        self.assertIn("geçerken anılıyor", first)
         self.assertIn("kabul etti (Applied)", text)
         self.assertIn("yapay zekâ incelemesi", text)
         self.assertIn("yamanın 3. düzeltilmiş hali", text)
-        self.assertIn("Hiçbir şey.", text)
+        self.assertIn("Göz at: coretemp'i etkiliyorsa", text)
         self.assertNotIn("Orijinal (İngilizce)", text)
         self.assertTrue(text.rstrip().endswith("https://lore/x"))
 
@@ -505,7 +505,11 @@ class PlainMessageTest(unittest.TestCase):
                            "Fixes a thing.")]
         group = sentinel.build_lore_groups(items)[0]
         self.assertEqual(sentinel.lore_relevance(group), "yellow")
-        self.assertIn("🟡", sentinel.compose_lore_message(group)["text"].split("\n")[0])
+        text = sentinel.compose_lore_message(group)["text"]
+        self.assertIn("🟡", text.split("\n")[0])
+        self.assertIn("Reviewed-by + Tested-by", text)
+        self.assertIn("Biri", text)
+        self.assertTrue(text.rstrip().endswith("https://lore/x"))
 
     def test_yellow_when_diff_touches_coretemp_c(self):
         diff = "Subject\n---\ndiff --git a/drivers/hwmon/coretemp.c b/drivers/hwmon/coretemp.c\n+x"
@@ -612,3 +616,17 @@ class PlainMessageTest(unittest.TestCase):
         self.assertIn("🟡", text.split("\n")[0])
         self.assertIn("Linus'un ana çekirdeğine (mainline)", text)
         self.assertIn("Ne yapmalısın?", text)
+        self.assertIn("Bilgi: birleştirildi.", text)
+        self.assertNotIn("Reviewed-by", text)
+
+
+class ReviewTodoTest(unittest.TestCase):
+    def test_patchwork_todo_by_level(self):
+        self.assertEqual(sentinel._patchwork_todo("yellow", "x"), sentinel.TODO_REVIEW)
+        self.assertEqual(sentinel._patchwork_todo("white", "x"), sentinel.TODO_GLANCE)
+        self.assertEqual(sentinel._patchwork_todo("red", "x"), "x")
+
+    def test_lore_v1_version_shown(self):
+        items = [lore_item("[PATCH v1] hwmon: (coretemp) X", "Biri", "2026-11-16T08:00:00Z", "b")]
+        text = sentinel.compose_lore_message(sentinel.build_lore_groups(items)[0])["text"]
+        self.assertIn("(v1)", text)
